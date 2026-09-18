@@ -1,0 +1,30 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/.omo
+/.kotlin
+/.codegraph
+
+# Local secrets (never commit real API keys)
+secrets.properties
+
+# Release signing (never commit any keystore, path configured in keystore.properties)
+*.keystore
+*.jks
+*.p12
+keystore.properties
+
+# Bundled JDK (used locally by build_debug.bat, too large for git)
+/jdk17/

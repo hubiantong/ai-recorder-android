@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 路径映射（todo 23 拍照附件）：仅暴露 cacheDir/camera/ 下的相机临时输出文件 -->
+<paths>
+    <cache-path name="camera" path="camera/" />
+</paths>

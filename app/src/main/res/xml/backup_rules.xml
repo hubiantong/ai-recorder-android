@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   全量备份规则（Android 11 及以下，fullBackupContent）。
+   与 data_extraction_rules.xml 保持一致：排除录音/密钥目录。
+   recordings/、segments/、attachments/ 为录音数据（体积大且含隐私）；
+   secrets.properties 为构建期密钥文件（禁止外泄）。
+-->
+<full-backup-content>
+    <exclude domain="file" path="recordings/" />
+    <exclude domain="file" path="segments/" />
+    <exclude domain="file" path="attachments/" />
+    <exclude domain="file" path="secrets.properties" />
+</full-backup-content>

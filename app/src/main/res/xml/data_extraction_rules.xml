@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   备份规则（Android 12+，dataExtractionRules）。
+   排除录音/密钥目录：
+   - recordings/、segments/、attachments/：录音本体、VAD 分段、照片附件（体积大且含隐私，
+     不随云备份/设备迁移）
+   - secrets.properties：构建期密钥文件（若被打包进应用数据，禁止外泄）
+   数据库（transcription/summary 文本）体积小，保留备份以便恢复。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="recordings/" />
+        <exclude domain="file" path="segments/" />
+        <exclude domain="file" path="attachments/" />
+        <exclude domain="file" path="secrets.properties" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="recordings/" />
+        <exclude domain="file" path="segments/" />
+        <exclude domain="file" path="attachments/" />
+        <exclude domain="file" path="secrets.properties" />
+    </device-transfer>
+</data-extraction-rules>
