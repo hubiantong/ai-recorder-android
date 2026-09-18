@@ -114,7 +114,9 @@ fun AirecorderandroidApp() {
             startDestination = Routes.HOME,
             modifier = Modifier.padding(innerPadding)
         ) {
-            composable(Routes.HOME) { HomeScreen() }
+            composable(Routes.HOME) {
+                HomeScreen(onSettingsClick = { navController.navigate(Routes.SETTINGS) })
+            }
             composable(Routes.HISTORY) { HistoryScreen(navController = navController) }
             composable("${Routes.DETAIL}/{recordingId}") { DetailScreen() }
             composable(Routes.SETTINGS) { SettingsScreen() }

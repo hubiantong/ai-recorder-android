@@ -91,8 +91,10 @@ class RecordingRepositoryTest {
     @Test
     fun stop_setsStatusCompleted() = runBlocking {
         val rec = repo.create(title = null, audioSource = null, meetingMode = false)
-        repo.stop(rec.id)
-        assertEquals(RecordingStatus.COMPLETED, db.recordingDao().getRecordingById(rec.id)?.status)
+        repo.stop(rec.id, 12.5)
+        val stored = db.recordingDao().getRecordingById(rec.id)
+        assertEquals(RecordingStatus.COMPLETED, stored?.status)
+        assertEquals(12.5, stored?.audioDurationSeconds)
     }
 
     @Test
@@ -102,7 +104,7 @@ class RecordingRepositoryTest {
 
     @Test
     fun stop_missingRecording_returnsNull() = runBlocking {
-        assertNull(repo.stop(999L))
+        assertNull(repo.stop(999L, 0.0))
     }
 
     @Test

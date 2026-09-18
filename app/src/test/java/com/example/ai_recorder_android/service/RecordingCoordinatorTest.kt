@@ -354,7 +354,7 @@ class RecordingCoordinatorTest {
             return created.firstOrNull { it.id == recordingId }
         }
 
-        override suspend fun stop(recordingId: Long): RecordingEntity? {
+        override suspend fun stop(recordingId: Long, durationSeconds: Double): RecordingEntity? {
             stopped += recordingId
             return created.firstOrNull { it.id == recordingId }
         }

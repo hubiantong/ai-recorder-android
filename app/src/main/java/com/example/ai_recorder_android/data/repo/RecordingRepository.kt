@@ -72,12 +72,18 @@ class RecordingRepository(
     }
 
     /**
-     * 停止录音：数据层将状态落库为 COMPLETED。
-     * 时长计算/时间戳对齐/先 [store] 再 stop 的编排在 todo 16。
+     * 停止录音：数据层将状态落库为 COMPLETED，并写入音频时长与完成时间。
+     * 时间戳对齐/先 [store] 再 stop 的编排在 todo 16。
      */
-    override suspend fun stop(recordingId: Long): RecordingEntity? {
+    override suspend fun stop(recordingId: Long, durationSeconds: Double): RecordingEntity? {
         val rec = recordingDao.getRecordingById(recordingId) ?: return null
-        recordingDao.updateRecording(rec.copy(status = RecordingStatus.COMPLETED))
+        recordingDao.updateRecording(
+            rec.copy(
+                status = RecordingStatus.COMPLETED,
+                audioDurationSeconds = durationSeconds,
+                completedAt = System.currentTimeMillis(),
+            ),
+        )
         return rec
     }
 

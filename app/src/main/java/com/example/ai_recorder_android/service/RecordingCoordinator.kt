@@ -237,9 +237,9 @@ class RecordingCoordinator(
         if (loaded.size == 1) {
             repository.store(recordingId, "recording.wav", loaded[0].second)
         }
-        repository.stop(recordingId)
+        repository.stop(recordingId, cursor)
 
-        // 复位会话（时长返回给调用方；DB 持久化 audio_duration 留给 todo 17 转写落库）
+        // 复位会话（时长已随 stop 落库 audio_duration_seconds）
         activeEngine = null
         activeRecordingId = null
         recordingStartWallMs = 0L

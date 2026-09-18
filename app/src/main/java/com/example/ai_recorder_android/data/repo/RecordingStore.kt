@@ -29,8 +29,11 @@ interface RecordingStore {
     /** 开始录音：数据层将状态落库为 PROCESSING。录音不存在返回 null。 */
     suspend fun start(recordingId: Long): RecordingEntity?
 
-    /** 停止录音：数据层将状态落库为 COMPLETED。录音不存在返回 null。 */
-    suspend fun stop(recordingId: Long): RecordingEntity?
+    /**
+     * 停止录音：数据层将状态落库为 COMPLETED，并写入 [durationSeconds]（音频时长）、
+     * completed_at。录音不存在返回 null。
+     */
+    suspend fun stop(recordingId: Long, durationSeconds: Double): RecordingEntity?
 
     /** 将录音文件存入 StorageService 并更新 Recording.audioPath，返回 locator；不存在返回 null。 */
     suspend fun store(recordingId: Long, fileName: String, data: ByteArray): String?

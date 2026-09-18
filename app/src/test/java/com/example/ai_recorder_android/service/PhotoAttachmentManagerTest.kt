@@ -243,7 +243,7 @@ class PhotoAttachmentManagerTest {
         override suspend fun start(recordingId: Long): RecordingEntity? =
             created.firstOrNull { it.id == recordingId }
 
-        override suspend fun stop(recordingId: Long): RecordingEntity? =
+        override suspend fun stop(recordingId: Long, durationSeconds: Double): RecordingEntity? =
             created.firstOrNull { it.id == recordingId }
 
         override suspend fun store(recordingId: Long, fileName: String, data: ByteArray): String? =

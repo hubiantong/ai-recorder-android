@@ -137,6 +137,11 @@ class AudioRecorderEngine(
             check(state == State.IDLE) { "已在录音中（state=$state）" }
             outputDir.mkdirs()
             val record = createAudioRecord()
+            // 必须显式 startRecording：否则 read() 恒返回 0，WAV 只有 44 字节头（无音频）
+            record.startRecording()
+            check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                "AudioRecord 启动失败（recordingState=${record.recordingState}）"
+            }
             audioRecord = record
             segmentIndex = 0
             totalPausedMs = 0L

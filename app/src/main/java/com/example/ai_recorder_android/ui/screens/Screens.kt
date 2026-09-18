@@ -8,6 +8,9 @@ import androidx.compose.ui.Modifier
  * 拍照入口（todo 23）已内建相机流程；设置导航待 todo 19 完成 MainActivity 接线。
  */
 @Composable
-fun HomeScreen(modifier: Modifier = Modifier) {
-    RecordingScreen(modifier = modifier)
+fun HomeScreen(
+    onSettingsClick: () -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    RecordingScreen(onSettingsClick = onSettingsClick, modifier = modifier)
 }
