@@ -41,6 +41,25 @@ fun selectPipeline(tier: String, vadEnabled: Boolean): PipelineMode = when {
     else -> PipelineMode.WHOLE_FILE
 }
 
+/** realtime 档文件回退使用的档位（同为 DashScope 文件识别，流式结果缺失时兜底）。 */
+const val REALTIME_FALLBACK_TIER = "pro_pro"
+
+/**
+ * 文件转写实际使用的 tier：`realtime` 无文件接口，回退 [REALTIME_FALLBACK_TIER]。
+ * 用于实时流转写失败/进程被杀后，由 WorkManager 用已持久化的 WAV 补齐转写。
+ */
+fun resolveFileTier(tier: String): String =
+    if (tier == "realtime") REALTIME_FALLBACK_TIER else tier
+
+/**
+ * 文件管线模式：`realtime` 档作为文件回退时按 VAD 开关选择分段/整文件，
+ * 避免长录音触发 fun-asr-flash 的 5 分钟上限；其余档位委托 [selectPipeline]。
+ */
+fun resolveFilePipeline(tier: String, vadEnabled: Boolean): PipelineMode = when {
+    tier == "realtime" -> if (vadEnabled) PipelineMode.VAD_SEGMENTED else PipelineMode.WHOLE_FILE
+    else -> selectPipeline(tier, vadEnabled)
+}
+
 // =====================================================================================
 // VAD 参数（默认值对齐 PC `core/user_config.py` / VadSegmenter 默认值）
 // =====================================================================================
@@ -427,9 +446,11 @@ class TranscriptionPipeline(
     /**
      * 按 tier + VAD 开关分发管线。
      *
+     * `realtime` 档走到这里说明流式结果不可用（连接失败 / 进程被杀），
+     * 使用已持久化的 WAV 回退文件转写（[REALTIME_FALLBACK_TIER]）。
+     *
      * @throws TranscriptionPipelineException 转写失败（已标记录音 FAILED）
      * @throws CancellationException 协程取消（原样传播，不标记 FAILED）
-     * @throws IllegalArgumentException realtime 档不适用文件转写
      */
     suspend fun transcribe(
         recordingId: Long,
@@ -438,14 +459,15 @@ class TranscriptionPipeline(
         vadEnabled: Boolean,
         language: String? = null,
     ): TranscriptionOutcome {
+        val fileTier = resolveFileTier(tier)
         return try {
-            when (selectPipeline(tier, vadEnabled)) {
+            when (resolveFilePipeline(tier, vadEnabled)) {
                 PipelineMode.REALTIME ->
                     throw IllegalArgumentException("realtime 档请使用 RealtimeTranscriptionPipeline 进行流式转写")
                 PipelineMode.VAD_SEGMENTED ->
-                    transcribeWithVad(recordingId, wavFile, tier, language)
+                    transcribeWithVad(recordingId, wavFile, fileTier, language)
                 PipelineMode.WHOLE_FILE ->
-                    transcribeWholeFile(recordingId, wavFile, tier, language)
+                    transcribeWholeFile(recordingId, wavFile, fileTier, language)
             }
         } catch (e: CancellationException) {
             throw e
@@ -466,7 +488,7 @@ class TranscriptionPipeline(
         if (samples.isEmpty()) throw TranscriptionPipelineException("音频文件为空或无法读取")
         val duration = samples.size / WavPcm.SAMPLE_RATE.toDouble()
 
-        val transcriber = transcriberFactory.create(tier)
+        val transcriber = transcriberFactory.create(resolveFileTier(tier))
         val result = transcriber.transcribe(wavFile, language)
         val chunks = toChunks(recordingId, result)
         val count = store.saveTranscription(recordingId, result.text, chunks, duration)
@@ -493,7 +515,7 @@ class TranscriptionPipeline(
             return transcribeWholeFile(recordingId, wavFile, tier, language).copy(fallbackUsed = true)
         }
 
-        val transcriber = transcriberFactory.create(tier)
+        val transcriber = transcriberFactory.create(resolveFileTier(tier))
         var successCount = 0
         var totalChunks = 0
         val textBuilder = StringBuilder()
@@ -639,7 +661,13 @@ class RealtimeTranscriptionPipeline(
     private val sentences = mutableListOf<RealtimeSentence>()
     private val closedLatch = CountDownLatch(1)
     private var connector: RealtimeAsrConnector? = null
+
+    /** 是否发生过 SDK 报错（WS 线程写，投递线程读，volatile 保证可见）。 */
+    @Volatile
     private var aborted = false
+
+    /** 是否已 start（投递线程读，volatile 保证可见）。 */
+    @Volatile
     private var started = false
     private var recordingId = 0L
 
@@ -673,10 +701,13 @@ class RealtimeTranscriptionPipeline(
         started = true
     }
 
-    /** 投递 16kHz int16 mono PCM 帧（录音引擎输出）。SDK 报错后忽略投递。 */
+    /**
+     * 投递 16kHz int16 mono PCM 帧（录音引擎输出）。
+     * 未启动/已收尾/SDK 报错后静默忽略——本方法可能由录音引擎线程调用，
+     * 不得抛异常（否则会打断音频读循环）。
+     */
     fun feedPcm16k(pcm16k: ByteArray) {
-        check(started) { "RealtimeTranscriptionPipeline 未启动" }
-        if (aborted) return
+        if (!started || aborted) return
         connector?.sendPcm16k(pcm16k)
     }
 

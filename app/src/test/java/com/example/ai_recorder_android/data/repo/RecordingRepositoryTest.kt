@@ -16,6 +16,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -27,8 +28,9 @@ import org.robolectric.RobolectricTestRunner
 /**
  * RecordingRepository 单测（in-memory Room + 临时目录 StorageService）：
  * create 默认值/标题、start/stop 状态落库、store 落盘+audioPath、
- * addAttachment 落盘+插行、finalizeSegmented 合并段文件+清理、
- * delete 级联删行+删文件、缺失录音的 no-op / fail-fast。
+ * addAttachment 落盘+插行、finalizeSegmented 单段/多段合并+头/时长校验+成功清理、
+ * 合并失败（时长不一致/段文件缺失/段头损坏）保留段文件、delete 级联删行+删文件、
+ * 缺失录音的 no-op / fail-fast。
  */
 @RunWith(RobolectricTestRunner::class)
 class RecordingRepositoryTest {
@@ -184,32 +186,13 @@ class RecordingRepositoryTest {
     fun finalizeSegmented_mergesSegmentFilesAndCleansUp() = runBlocking {
         val rec = repo.create(title = null, audioSource = null, meetingMode = false)
         // 模拟引擎产物：两段合法 WAV（44 字节头 + PCM），经 DAO 落段行
-        val pcm0 = ByteArray(1600) { 1 } // 0.1s @16kHz
-        val pcm1 = ByteArray(3200) { 2 } // 0.2s @16kHz
+        // 16kHz/16-bit/mono → 32000 字节/秒
+        val pcm0 = ByteArray(3200) { 1 } // 0.1s
+        val pcm1 = ByteArray(6400) { 2 } // 0.2s
         val seg0Locator = storage.saveSegment(rec.id, 0, wavBytes(pcm0))
         val seg1Locator = storage.saveSegment(rec.id, 1, wavBytes(pcm1))
-        db.segmentDao().insert(
-            RecordingAudioSegmentEntity(
-                recordingId = rec.id,
-                segmentIndex = 0,
-                audioPath = seg0Locator,
-                startTime = 0.0,
-                endTime = 0.1,
-                duration = 0.1,
-                createdAt = 1_752_000_000_000L,
-            ),
-        )
-        db.segmentDao().insert(
-            RecordingAudioSegmentEntity(
-                recordingId = rec.id,
-                segmentIndex = 1,
-                audioPath = seg1Locator,
-                startTime = 0.1,
-                endTime = 0.3,
-                duration = 0.2,
-                createdAt = 1_752_000_000_000L,
-            ),
-        )
+        insertSegmentRow(rec.id, 0, seg0Locator, 0.0, 0.1, 0.1)
+        insertSegmentRow(rec.id, 1, seg1Locator, 0.1, 0.3, 0.2)
 
         val merged = repo.finalizeSegmented(rec.id, totalDuration = 0.3)
 
@@ -236,6 +219,85 @@ class RecordingRepositoryTest {
         assertNull(repo.finalizeSegmented(999L, totalDuration = 0.0))
     }
 
+    @Test
+    fun finalizeSegmented_singleSegment_mergesValidWavAndCleansUp() = runBlocking {
+        val rec = repo.create(title = null, audioSource = null, meetingMode = false)
+        val pcm = ByteArray(3200) { 3 } // 0.2s @16kHz
+        val segLocator = storage.saveSegment(rec.id, 0, wavBytes(pcm))
+        insertSegmentRow(rec.id, 0, segLocator, 0.0, 0.2, 0.2)
+
+        val merged = repo.finalizeSegmented(rec.id, totalDuration = 0.2)
+
+        assertNotNull("单段也必须产出整段 WAV", merged)
+        val mergedBytes = storage.readFile(merged!!)!!
+        assertEquals(WavFileWriter.HEADER_SIZE + pcm.size, mergedBytes.size)
+        val payload = mergedBytes.copyOfRange(WavFileWriter.HEADER_SIZE, mergedBytes.size)
+        assertTrue("PCM 载荷应与段一致", payload.contentEquals(pcm))
+        // 文件头合法性：RIFF/WAVE/fmt /data 标识 + 大小字段回填
+        assertEquals("RIFF", String(mergedBytes, 0, 4, Charsets.US_ASCII))
+        assertEquals("WAVE", String(mergedBytes, 8, 4, Charsets.US_ASCII))
+        assertEquals("fmt ", String(mergedBytes, 12, 4, Charsets.US_ASCII))
+        assertEquals("data", String(mergedBytes, 36, 4, Charsets.US_ASCII))
+        assertEquals("dataSize 应回填", pcm.size, readIntLE(mergedBytes, 40))
+        assertEquals("RIFF chunkSize 应回填", mergedBytes.size - 8, readIntLE(mergedBytes, 4))
+        assertEquals(merged, db.recordingDao().getRecordingById(rec.id)?.audioPath)
+        assertFalse("合并成功后应清理段文件", storage.exists(segLocator))
+    }
+
+    @Test
+    fun finalizeSegmented_durationMismatch_throwsAndKeepsSegmentFiles() = runBlocking {
+        val rec = repo.create(title = null, audioSource = null, meetingMode = false)
+        val pcm0 = ByteArray(1600) // 0.1s
+        val pcm1 = ByteArray(3200) // 0.2s
+        val seg0Locator = storage.saveSegment(rec.id, 0, wavBytes(pcm0))
+        val seg1Locator = storage.saveSegment(rec.id, 1, wavBytes(pcm1))
+        insertSegmentRow(rec.id, 0, seg0Locator, 0.0, 0.1, 0.1)
+        insertSegmentRow(rec.id, 1, seg1Locator, 0.1, 0.3, 0.2)
+
+        // 记录的录音时长与文件实际时长（0.3s）不一致 → 校验失败
+        val error = assertThrows(IllegalStateException::class.java) {
+            runBlocking { repo.finalizeSegmented(rec.id, totalDuration = 10.0) }
+        }
+
+        assertTrue("应提示校验失败: ${error.message}", error.message!!.contains("校验失败"))
+        assertEquals("失败不得更新 audioPath", "", db.recordingDao().getRecordingById(rec.id)?.audioPath)
+        assertTrue("失败必须保留段 0 文件", storage.exists(seg0Locator))
+        assertTrue("失败必须保留段 1 文件", storage.exists(seg1Locator))
+    }
+
+    @Test
+    fun finalizeSegmented_missingSegmentFile_throwsAndKeepsOtherSegments() = runBlocking {
+        val rec = repo.create(title = null, audioSource = null, meetingMode = false)
+        val seg0Locator = storage.saveSegment(rec.id, 0, wavBytes(ByteArray(1600)))
+        val seg1Locator = storage.saveSegment(rec.id, 1, wavBytes(ByteArray(3200)))
+        insertSegmentRow(rec.id, 0, seg0Locator, 0.0, 0.1, 0.1)
+        insertSegmentRow(rec.id, 1, seg1Locator, 0.1, 0.3, 0.2)
+        storage.deleteFile(seg1Locator) // 模拟段文件丢失
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            runBlocking { repo.finalizeSegmented(rec.id, totalDuration = 0.3) }
+        }
+
+        assertTrue("应提示段文件缺失: ${error.message}", error.message!!.contains("段文件缺失"))
+        assertEquals("失败不得更新 audioPath", "", db.recordingDao().getRecordingById(rec.id)?.audioPath)
+        assertTrue("其余段文件必须保留", storage.exists(seg0Locator))
+    }
+
+    @Test
+    fun finalizeSegmented_corruptedSegmentHeader_throwsAndKeepsFile() = runBlocking {
+        val rec = repo.create(title = null, audioSource = null, meetingMode = false)
+        val segLocator = storage.saveSegment(rec.id, 0, ByteArray(10) { 7 }) // 非 WAV 段文件
+        insertSegmentRow(rec.id, 0, segLocator, 0.0, 0.0, 0.0)
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            runBlocking { repo.finalizeSegmented(rec.id, totalDuration = 0.0) }
+        }
+
+        assertTrue("应提示段文件非法: ${error.message}", error.message!!.contains("段文件非法"))
+        assertEquals("失败不得更新 audioPath", "", db.recordingDao().getRecordingById(rec.id)?.audioPath)
+        assertTrue("失败必须保留原始段文件", storage.exists(segLocator))
+    }
+
     // ---------- delete ----------
 
     @Test
@@ -260,6 +322,35 @@ class RecordingRepositoryTest {
     }
 
     // ---------- 工具 ----------
+
+    /** 插入一段音频行（时间轴/时长按调用方给定）。 */
+    private suspend fun insertSegmentRow(
+        recordingId: Long,
+        index: Int,
+        locator: String,
+        startTime: Double,
+        endTime: Double,
+        duration: Double,
+    ) {
+        db.segmentDao().insert(
+            RecordingAudioSegmentEntity(
+                recordingId = recordingId,
+                segmentIndex = index,
+                audioPath = locator,
+                startTime = startTime,
+                endTime = endTime,
+                duration = duration,
+                createdAt = 1_752_000_000_000L,
+            ),
+        )
+    }
+
+    /** 读取 little-endian int32（断言 WAV 头大小字段用）。 */
+    private fun readIntLE(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
 
     /** 用 WavFileWriter 构造合法 WAV 字节（44 字节头 + PCM，大小字段回填）。 */
     private fun wavBytes(pcm: ByteArray): ByteArray {

@@ -16,6 +16,7 @@ import java.io.ByteArrayOutputStream
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.math.abs
 
 /**
  * 录音仓储层：封装 [RecordingDao] + [AttachmentDao] + [StorageService]，
@@ -127,15 +128,17 @@ class RecordingRepository(
     }
 
     /**
-     * 分段录音收尾：合并全部段文件为整段 WAV 并清理段文件（对齐 PC `finalize_segmented_recording`）。
+     * 录音收尾合并（对齐 PC `finalize_segmented_recording`，单段/多段统一入口）。
      *
-     * 1. 读取各段文件（`segments/seg_{rid}_{idx}.wav`），剥离 44 字节 WAV 头后拼接 PCM 载荷；
+     * 1. 读取各段文件（`segments/seg_{rid}_{idx}.wav`），校验段头后剥离 44 字节 WAV 头拼接 PCM 载荷；
      * 2. 以 16kHz/16-bit/mono 写整段 WAV（[WavFileWriter] 头 + 拼接 PCM）→ `recordings/rec_{uuid}.wav`；
-     * 3. 更新 Recording.audioPath 为新 locator；
-     * 4. 删除全部段文件。
+     * 3. 校验合并文件：WAV 头字段合法性 + 实际时长与 [totalDuration] 一致（容差 [DURATION_TOLERANCE_SECONDS]）；
+     * 4. 校验通过后更新 Recording.audioPath，再删除全部段文件。
      *
-     * 返回合并后的 locator；录音不存在/无段/无有效音频数据时返回 null。
-     * 状态置 COMPLETED、duration 写入等业务语义留给 todo 16。
+     * **失败语义**：段文件缺失/段头非法/时长不一致等任一环节失败时抛 [IllegalStateException]，
+     * 且不删除任何段文件、不更新 audioPath —— 调用方保留原始分段并可重试本方法。
+     *
+     * 返回合并后的 locator；录音不存在/无段时返回 null。
      */
     override suspend fun finalizeSegmented(recordingId: Long, totalDuration: Double): String? {
         val rec = recordingDao.getRecordingById(recordingId) ?: return null
@@ -144,19 +147,19 @@ class RecordingRepository(
 
         val pcm = ByteArrayOutputStream()
         for (segment in segments) {
-            val bytes = storage.readFile(segment.audioPath) ?: continue
-            val payload = if (bytes.size > WavFileWriter.HEADER_SIZE) {
-                bytes.copyOfRange(WavFileWriter.HEADER_SIZE, bytes.size)
-            } else {
-                bytes
-            }
-            pcm.write(payload)
+            val bytes = storage.readFile(segment.audioPath)
+                ?: throw IllegalStateException(
+                    "段文件缺失，无法合并（recordingId=$recordingId, segmentIndex=${segment.segmentIndex}, " +
+                        "locator=${segment.audioPath}）",
+                )
+            pcm.write(extractPcmPayload(recordingId, segment, bytes))
         }
-        val payload = pcm.toByteArray()
-        if (payload.isEmpty()) return null
+        val merged = buildWav(pcm.toByteArray())
+        validateMergedWav(recordingId, merged, totalDuration)
 
-        val locator = storage.saveRecording("merged.wav", buildWav(payload))
+        val locator = storage.saveRecording("merged.wav", merged)
         recordingDao.updateRecording(rec.copy(audioPath = locator))
+        // 合并与校验全部成功后才清理临时分段，失败路径不会执行到这里
         segments.forEach { storage.deleteFile(it.audioPath) }
         return locator
     }
@@ -223,6 +226,97 @@ class RecordingRepository(
 
     // ---------- 内部 ----------
 
+    /**
+     * 校验段文件头并剥离 44 字节 WAV 头，返回 PCM 载荷。
+     * 文件过短或缺少 RIFF/WAVE 标识时视为损坏，抛 [IllegalStateException]（不进入拼接）。
+     */
+    private fun extractPcmPayload(
+        recordingId: Long,
+        segment: RecordingAudioSegmentEntity,
+        bytes: ByteArray,
+    ): ByteArray {
+        fun fail(reason: String): Nothing = throw IllegalStateException(
+            "段文件非法，无法合并（recordingId=$recordingId, segmentIndex=${segment.segmentIndex}, " +
+                "locator=${segment.audioPath}）：$reason",
+        )
+        if (bytes.size < WavFileWriter.HEADER_SIZE) {
+            fail("长度 ${bytes.size} 小于 WAV 头 ${WavFileWriter.HEADER_SIZE}")
+        }
+        if (readAscii(bytes, 0, 4) != "RIFF" || readAscii(bytes, 8, 4) != "WAVE") {
+            fail("缺少 RIFF/WAVE 标识")
+        }
+        return bytes.copyOfRange(WavFileWriter.HEADER_SIZE, bytes.size)
+    }
+
+    /**
+     * 合并结果校验：WAV 头格式合法性 + 实际时长与记录的录音时长一致性。
+     *
+     * 头校验覆盖 RIFF/WAVE/fmt /data 标识、PCM 编码、声道/采样率/位深、
+     * byteRate/blockAlign 派生字段及各 chunk 大小字段；时长按
+     * `dataSize / (sampleRate × blockAlign)` 计算，与 [expectedDurationSeconds]
+     * 的偏差不得超过 [DURATION_TOLERANCE_SECONDS]（容纳 PCM 载荷取整误差）。
+     *
+     * @throws IllegalStateException 任一项不满足（调用方据此保留分段文件）
+     */
+    private fun validateMergedWav(recordingId: Long, bytes: ByteArray, expectedDurationSeconds: Double) {
+        fun fail(reason: String): Nothing =
+            throw IllegalStateException("合并 WAV 校验失败（recordingId=$recordingId）：$reason")
+
+        if (bytes.size < WavFileWriter.HEADER_SIZE) {
+            fail("文件长度 ${bytes.size} 小于 WAV 头 ${WavFileWriter.HEADER_SIZE}")
+        }
+        if (readAscii(bytes, 0, 4) != "RIFF") fail("缺少 RIFF 标识")
+        if (readAscii(bytes, 8, 4) != "WAVE") fail("缺少 WAVE 标识")
+        if (readAscii(bytes, 12, 4) != "fmt ") fail("缺少 fmt 块")
+        if (readAscii(bytes, 36, 4) != "data") fail("缺少 data 块")
+
+        val audioFormat = readShortLE(bytes, 20)
+        val channels = readShortLE(bytes, 22)
+        val sampleRate = readIntLE(bytes, 24)
+        val byteRate = readIntLE(bytes, 28)
+        val blockAlign = readShortLE(bytes, 32)
+        val bitsPerSample = readShortLE(bytes, 34)
+        val riffChunkSize = readIntLE(bytes, 4)
+        val dataSize = readIntLE(bytes, 40)
+
+        if (audioFormat != 1) fail("audioFormat=$audioFormat（期望 1 = PCM）")
+        if (channels != WavFileWriter.DEFAULT_CHANNELS) fail("channels=$channels（期望 ${WavFileWriter.DEFAULT_CHANNELS}）")
+        if (sampleRate != WavFileWriter.DEFAULT_SAMPLE_RATE) {
+            fail("sampleRate=$sampleRate（期望 ${WavFileWriter.DEFAULT_SAMPLE_RATE}）")
+        }
+        if (bitsPerSample != WavFileWriter.DEFAULT_BITS_PER_SAMPLE) {
+            fail("bitsPerSample=$bitsPerSample（期望 ${WavFileWriter.DEFAULT_BITS_PER_SAMPLE}）")
+        }
+        if (blockAlign != channels * bitsPerSample / 8) fail("blockAlign=$blockAlign 与声道/位深不匹配")
+        if (byteRate != sampleRate * blockAlign) fail("byteRate=$byteRate 与采样率/blockAlign 不匹配")
+        if (dataSize != bytes.size - WavFileWriter.HEADER_SIZE) {
+            fail("dataSize=$dataSize 与实际载荷 ${bytes.size - WavFileWriter.HEADER_SIZE} 不一致")
+        }
+        if (riffChunkSize != bytes.size - 8) fail("RIFF chunkSize=$riffChunkSize 与实际文件大小不匹配")
+
+        val actualDuration = dataSize.toDouble() / (sampleRate * blockAlign)
+        if (abs(actualDuration - expectedDurationSeconds) > DURATION_TOLERANCE_SECONDS) {
+            fail("实际时长 ${"%.3f".format(actualDuration)}s 与记录时长 ${"%.3f".format(expectedDurationSeconds)}s 不一致")
+        }
+    }
+
+    /** 读取 [offset] 起 [length] 字节的 ASCII 文本（长度不足时返回空串）。 */
+    private fun readAscii(bytes: ByteArray, offset: Int, length: Int): String {
+        if (offset < 0 || offset + length > bytes.size) return ""
+        return String(bytes, offset, length, Charsets.US_ASCII)
+    }
+
+    /** 读取 little-endian int32。 */
+    private fun readIntLE(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
+
+    /** 读取 little-endian uint16（以 Int 返回）。 */
+    private fun readShortLE(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+
     /** 拼接 PCM 载荷为完整 WAV（44 字节头 + 数据，回填 RIFF/data 大小字段）。 */
     private fun buildWav(pcm: ByteArray): ByteArray {
         val out = ByteArrayOutputStream(WavFileWriter.HEADER_SIZE + pcm.size)
@@ -250,4 +344,9 @@ class RecordingRepository(
         "录音 " + Instant.ofEpochMilli(now)
             .atZone(ZoneId.systemDefault())
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+
+    companion object {
+        /** 合并文件实际时长与记录时长允许的偏差（秒），容纳 PCM 载荷取整误差。 */
+        private const val DURATION_TOLERANCE_SECONDS = 0.1
+    }
 }

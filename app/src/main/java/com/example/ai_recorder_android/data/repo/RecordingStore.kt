@@ -41,7 +41,15 @@ interface RecordingStore {
     /** 删除录音：DB 行级联删除 + 尽力清理 storage 文件；不存在时静默返回。 */
     suspend fun delete(recordingId: Long)
 
-    /** 分段录音收尾：合并全部段文件为整段 WAV 并清理段文件，返回合并后 locator；无段返回 null。 */
+    /**
+     * 录音收尾合并（停止流程最后环节，单段/多段统一走本方法）：
+     * 1. 合并全部段文件 PCM 载荷为整段 WAV（回填 RIFF/data 大小字段）；
+     * 2. 校验合并文件 WAV 头合法性 + 文件实际时长与 [totalDuration] 一致；
+     * 3. 校验通过并落盘/更新 audioPath 后才删除全部段文件；
+     * 4. 合并或校验任一步失败抛异常，且**不删除任何段文件**（原始分段完整保留，可重试）。
+     *
+     * 返回合并后 locator；录音不存在/无段返回 null。
+     */
     suspend fun finalizeSegmented(recordingId: Long, totalDuration: Double): String?
 
     /**

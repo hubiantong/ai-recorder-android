@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -42,7 +43,9 @@ import com.example.ai_recorder_android.App
 import com.example.ai_recorder_android.R
 import com.example.ai_recorder_android.data.repo.UserConfigRepository
 import com.example.ai_recorder_android.service.RecordingCoordinator
+import com.example.ai_recorder_android.service.RecordingPhase
 import com.example.ai_recorder_android.service.RecordingService
+import com.example.ai_recorder_android.service.RecordingSessionState
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -53,25 +56,18 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-/**
- * 录音界面 UI 状态机（todo 19）。
- *
- * 流转对齐 todo 16 [com.example.ai_recorder_android.service.RecordingCoordinator]：
- * `IDLE → RECORDING ⇄ PAUSED → STOPPED`（Coordinator 的 COMPLETED 在 UI 层命名为 STOPPED，
- * 表示一次会话结束、可再次开始）。
- */
-enum class RecordingUiState { IDLE, RECORDING, PAUSED, STOPPED }
-
 /** 实时转写气泡条目（id 供 LazyColumn key 使用）。 */
 data class PartialTranscript(val id: Long, val text: String)
 
 /**
  * 录音主页 ViewModel（todo 19，代码库首个 ViewModel）。
  *
- * **职责边界**：只持有 UI 状态（状态机/音量/转写气泡/档位），**不实现录音逻辑**——
- * 实际录音由共享 [RecordingCoordinator]（App 单例）+ [RecordingService] 编排，
- * 本类已接线：录音按钮 → RecordingService intent → 共享 RecordingCoordinator，
- * 音量电平经 [coordinator.levelListener] 回流（[onLevel]）。
+ * **职责边界**：只持有 UI 展示状态（音量/转写气泡/档位），**不实现录音逻辑**——
+ * 实际录音由共享 [RecordingCoordinator]（App 单例）+ [RecordingService] 编排。
+ *
+ * **状态来源**：录音会话状态直接取自 [RecordingCoordinator.sessionState]（[sessionState]），
+ * 点击只发送服务命令、不做乐观更新；按钮可用性/文案完全由 Coordinator 的真实阶段驱动，
+ * 启动失败（[RecordingSessionState.errorMessage]）也会回流到 UI。
  *
  * 构造注入 [Context] + [RecordingCoordinator] + [UserConfigRepository]
  * （无 DI 框架，生产装配见 [factory]）。
@@ -82,8 +78,8 @@ class RecordingViewModel(
     private val userConfigRepository: UserConfigRepository,
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(RecordingUiState.IDLE)
-    val uiState: StateFlow<RecordingUiState> = _uiState.asStateFlow()
+    /** 录音会话真实状态（唯一来源：Coordinator，UI 不自行推断）。 */
+    val sessionState: StateFlow<RecordingSessionState> = coordinator.sessionState
 
     /** RMS 音量电平 0.0-1.0（Metis S2.3 降级版：音量条而非像素波形）。 */
     private val _rmsLevel = MutableStateFlow(0f)
@@ -114,38 +110,35 @@ class RecordingViewModel(
         }
     }
 
-    // ---------- 录音控制（已接线：按钮 → RecordingService intent → 共享 RecordingCoordinator） ----------
+    // ---------- 录音控制（只发命令；状态由 Coordinator 回推） ----------
 
-    /** 开始录音：IDLE/STOPPED → RECORDING。 */
+    /** 开始录音：仅在 Coordinator 处于空闲/已完成/失败态时发送命令，不做乐观更新。 */
     fun onStartClick() {
-        val current = _uiState.value
-        if (current != RecordingUiState.IDLE && current != RecordingUiState.STOPPED) return
+        val phase = sessionState.value.phase
+        if (phase != RecordingPhase.IDLE && phase != RecordingPhase.COMPLETED && phase != RecordingPhase.ERROR) return
         _partials.value = emptyList()
         _rmsLevel.value = 0f
-        _uiState.value = RecordingUiState.RECORDING
         val outputDir = File(context.filesDir, "recordings").apply { mkdirs() }
         context.startForegroundService(RecordingService.startIntent(context, outputDir))
     }
 
-    /** 暂停：RECORDING → PAUSED。 */
+    /** 暂停：仅在 Coordinator 真实处于 RECORDING 时发送。 */
     fun onPauseClick() {
-        if (_uiState.value != RecordingUiState.RECORDING) return
-        _uiState.value = RecordingUiState.PAUSED
+        if (sessionState.value.phase != RecordingPhase.RECORDING) return
         context.startService(RecordingService.pauseIntent(context))
     }
 
-    /** 继续：PAUSED → RECORDING。 */
+    /** 继续：仅在 Coordinator 真实处于 PAUSED 时发送。 */
     fun onResumeClick() {
-        if (_uiState.value != RecordingUiState.PAUSED) return
-        _uiState.value = RecordingUiState.RECORDING
+        if (sessionState.value.phase != RecordingPhase.PAUSED) return
         context.startService(RecordingService.resumeIntent(context))
     }
 
-    /** 停止：RECORDING/PAUSED → STOPPED。 */
+    /** 停止：仅在 Coordinator 真实存在活动会话时发送。 */
     fun onStopClick() {
-        val current = _uiState.value
-        if (current != RecordingUiState.RECORDING && current != RecordingUiState.PAUSED) return
-        _uiState.value = RecordingUiState.STOPPED
+        if (!sessionState.value.isActive) return
+        // 会话结束，摘掉「正在识别」气泡（最终句由回调另行追加）
+        _partials.value = _partials.value.filterNot { it.id == LIVE_PARTIAL_ID }
         context.startService(RecordingService.stopIntent(context))
     }
 
@@ -213,13 +206,20 @@ fun RecordingScreen(
     onSettingsClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    val uiState by viewModel.uiState.collectAsState()
+    val session by viewModel.sessionState.collectAsState()
     val rmsLevel by viewModel.rmsLevel.collectAsState()
     val partials by viewModel.partials.collectAsState()
     val tier by viewModel.tier.collectAsState()
 
     // 录音权限请求：已授权时系统直接回调 granted，无需手动预检
     val context = LocalContext.current
+
+    // 启动/停止失败（Coordinator 真实状态回推）→ 用户可见提示；失败态可直接重试
+    LaunchedEffect(session.errorMessage) {
+        session.errorMessage?.let { message ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -273,9 +273,9 @@ fun RecordingScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // 录音控制：开始/停止 + 暂停/继续（按状态机启停）
+        // 录音控制：开始/停止 + 暂停/继续（按 Coordinator 真实状态启停）
         RecordingControls(
-            uiState = uiState,
+            session = session,
             onStartClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
             onStopClick = viewModel::onStopClick,
             onPauseClick = viewModel::onPauseClick,
@@ -290,7 +290,7 @@ fun RecordingScreen(
                 onPhotoClick()
                 photoController.launch()
             },
-            enabled = uiState == RecordingUiState.RECORDING || uiState == RecordingUiState.PAUSED,
+            enabled = session.isActive,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text("拍照")
@@ -373,19 +373,24 @@ private fun PartialTranscriptList(
     }
 }
 
-/** 录音控制按钮组：按状态机启停（IDLE/STOPPED 可开始，RECORDING 可暂停/停止，PAUSED 可继续/停止）。 */
+/**
+ * 录音控制按钮组：按 Coordinator 真实阶段启停。
+ *
+ * STARTING/STOPPING 过渡期全部禁用（避免快速连点产生乱序命令）；
+ * IDLE/COMPLETED/ERROR 可开始（失败可直接重试）。
+ */
 @Composable
 private fun RecordingControls(
-    uiState: RecordingUiState,
+    session: RecordingSessionState,
     onStartClick: () -> Unit,
     onStopClick: () -> Unit,
     onPauseClick: () -> Unit,
     onResumeClick: () -> Unit,
 ) {
-    val canStart = uiState == RecordingUiState.IDLE || uiState == RecordingUiState.STOPPED
-    val canStop = uiState == RecordingUiState.RECORDING || uiState == RecordingUiState.PAUSED
-    val canPause = uiState == RecordingUiState.RECORDING
-    val canResume = uiState == RecordingUiState.PAUSED
+    val canStart = !session.isActive && !session.isBusy
+    val canStop = session.isActive
+    val canPause = session.phase == RecordingPhase.RECORDING
+    val canResume = session.phase == RecordingPhase.PAUSED
 
     Row(modifier = Modifier.fillMaxWidth()) {
         FilledTonalButton(

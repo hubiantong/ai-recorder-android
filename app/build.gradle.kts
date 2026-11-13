@@ -119,6 +119,9 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.datastore.preferences)
 
+    // WorkManager：录音后处理链（转写 → 自动标题 → 融合笔记），进程重启后自动恢复
+    implementation(libs.androidx.work.runtime.ktx)
+
     // Room
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)

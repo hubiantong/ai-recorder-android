@@ -11,18 +11,61 @@ import com.example.ai_recorder_android.data.db.RecordingAttachmentEntity
 import com.example.ai_recorder_android.data.db.RecordingEntity
 import com.example.ai_recorder_android.data.repo.RecordingStore
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * 录音编排层状态机（todo 16）：对齐 PC `core/audio/recorder.py` + `pc_api/recording_service.py`。
+ * 录音会话阶段（编排层状态机）：对齐 PC `core/audio/recorder.py` + `pc_api/recording_service.py`。
  *
- * 状态流转：`IDLE → RECORDING ⇄ PAUSED → COMPLETED`；[stop] 后允许重新 [startRecording]（PC 语义）。
+ * 流转：`IDLE → STARTING → RECORDING ⇄ PAUSED → STOPPING → COMPLETED`；
+ * 启动/停止失败进入 [ERROR]（可重试）；[stop] 后允许重新 [startRecording]（PC 语义）。
  */
-enum class CoordinatorState { IDLE, RECORDING, PAUSED, COMPLETED }
+enum class RecordingPhase {
+    /** 无会话（首次进入 / 删除活动会话后）。 */
+    IDLE,
+
+    /** 启动中：已创建 DB 行，引擎 start 尚未返回。 */
+    STARTING,
+
+    RECORDING,
+    PAUSED,
+
+    /** 停止中：引擎收尾 + 段落/整段落库尚未完成。 */
+    STOPPING,
+
+    /** 会话已完成并落库，可再次开始。 */
+    COMPLETED,
+
+    /** 启动或停止失败（引擎/存储异常），可重试。 */
+    ERROR,
+}
+
+/**
+ * 录音会话状态（对外唯一状态源）：UI / 服务只读此状态，不再按点击动作乐观推断。
+ *
+ * @property recordingId 当前会话 id；[RecordingPhase.COMPLETED] 时保留刚结束的会话 id
+ * @property errorMessage 进入 [RecordingPhase.ERROR] 时的用户可读原因
+ */
+data class RecordingSessionState(
+    val phase: RecordingPhase = RecordingPhase.IDLE,
+    val recordingId: Long? = null,
+    val errorMessage: String? = null,
+) {
+    /** 是否有活动会话（可暂停/继续/停止/拍照）。 */
+    val isActive: Boolean
+        get() = phase == RecordingPhase.RECORDING || phase == RecordingPhase.PAUSED
+
+    /** 是否处于启动/停止过渡期：UI 应禁用全部控制，避免快速连点产生乱序命令。 */
+    val isBusy: Boolean
+        get() = phase == RecordingPhase.STARTING || phase == RecordingPhase.STOPPING
+}
 
 /**
  * 时钟抽象（注入单调/墙钟，测试可控）。
@@ -45,8 +88,8 @@ fun interface Clock {
  * 录音编排层：状态机 + 暂停时长累计 + 照片时间戳对齐（对齐 PC `pc_api/recording_service.py`）。
  *
  * **职责**：
- * - 状态机编排：create→PROCESSING→引擎 start；stop 时 finalize 段文件、段落库、
- *   单段 WAV 落库为 recordings/rec_xxx.wav、状态置 COMPLETED；
+ * - 状态机编排：create→PROCESSING→引擎 start；stop 时 finalize 段文件、全部段落库、
+ *   合并整段 WAV（recordings/rec_xxx.wav）、状态置 COMPLETED；
  * - 暂停时长累计：用注入的单调时钟（对齐引擎 totalPausedMs 语义），供时间轴对齐扣除；
  * - 附件时间戳对齐：`photo_time - recording_start_time - 暂停`（Metis P6.8）。
  *
@@ -60,8 +103,10 @@ fun interface Clock {
  * 前台服务负责通知/生命周期（todo 10），本类负责业务编排；todo 19 接线二者
  * （服务事件 → 本类方法调用），本类不持有 Android 依赖（纯 JVM 可测）。
  *
- * **待办**：VAD 多段合并（[RecordingStore.finalizeSegmented]）与段转写为 todo 17；
- * 本次 stop 仅处理单段场景（多段时仅落段行，不落整段 WAV）。
+ * **待办**：段级转写为 todo 17。
+ * **收尾合并**：stop 末段统一调用 [RecordingStore.finalizeSegmented]（单段/多段一致）——
+ * 合并 + WAV 头/时长校验通过后才清理段文件；失败时保留全部原始分段，
+ * 可调用 [finalizeSegmented] 重试，停止流程本身不被中断。
  */
 class RecordingCoordinator(
     private val repository: RecordingStore,
@@ -81,8 +126,13 @@ class RecordingCoordinator(
 
     private val mutex = Mutex()
 
-    @Volatile
-    private var state = CoordinatorState.IDLE
+    private val _sessionState = MutableStateFlow(RecordingSessionState())
+
+    /**
+     * 录音会话真实状态（唯一状态源）：UI / [RecordingService] 均以此为准，
+     * 不按点击动作乐观推断；启动/停止失败也会在此反映（[RecordingPhase.ERROR]）。
+     */
+    val sessionState: StateFlow<RecordingSessionState> = _sessionState.asStateFlow()
 
     @Volatile
     private var activeEngine: RecordingAudioEngine? = null
@@ -108,7 +158,10 @@ class RecordingCoordinator(
 
     // ---------- 对外状态 ----------
 
-    val currentState: CoordinatorState get() = state
+    /** 当前阶段（内部状态机判定用）。 */
+    private val phase: RecordingPhase get() = _sessionState.value.phase
+
+    /** 当前活动会话 id（不含 [RecordingPhase.COMPLETED] 保留的已结束 id）。 */
     val currentRecordingId: Long? get() = activeRecordingId
 
     /** 累计暂停时长（毫秒）。 */
@@ -126,7 +179,7 @@ class RecordingCoordinator(
      */
     var transcriptListener: ((partial: Boolean, text: String) -> Unit)? = null
 
-    /** 引擎错误监听（todo 19 接 UI/兜底）；引擎线程回调。 */
+    /** 引擎/收尾错误监听（引擎错误、停止时合并失败等）；引擎线程或调用线程回调。 */
     var errorListener: ((Throwable) -> Unit)? = null
 
     /**
@@ -143,11 +196,12 @@ class RecordingCoordinator(
 
     /**
      * 开始录音（对齐 PC `create_recording` + `start_recording`）：
-     * 1. 创建 PENDING 行 → 状态落库 PROCESSING；
-     * 2. 经 [RecordingAudioEngineFactory] 创建引擎并 start（输出段文件到 [outputDir]）；
-     * 3. 引擎 start 失败时回滚删除 DB 行并重抛。
+     * 1. 置 [RecordingPhase.STARTING]（UI 立即进入过渡态）；
+     * 2. 创建 PENDING 行 → 状态落库 PROCESSING；
+     * 3. 经 [RecordingAudioEngineFactory] 创建引擎并 start（输出段文件到 [outputDir]）；
+     * 4. 成功后置 [RecordingPhase.RECORDING]；任一步失败回滚 DB 行、置 [RecordingPhase.ERROR] 并重抛。
      *
-     * @throws IllegalStateException 已在录音中
+     * @throws IllegalStateException 已在录音中/启动中
      */
     suspend fun startRecording(
         outputDir: File,
@@ -155,108 +209,138 @@ class RecordingCoordinator(
         audioSource: AudioSource? = null,
         meetingMode: Boolean = false,
     ): RecordingEntity = mutex.withLock {
-        check(state == CoordinatorState.IDLE || state == CoordinatorState.COMPLETED) {
-            "已在录音中（state=$state）"
+        check(phase == RecordingPhase.IDLE || phase == RecordingPhase.COMPLETED || phase == RecordingPhase.ERROR) {
+            "已在录音中（phase=$phase）"
         }
+        publish(RecordingPhase.STARTING)
 
-        val rec = repository.create(title, audioSource, meetingMode)
-        repository.start(rec.id)
-
-        val engine = engineFactory.create(rec.id, outputDir, this)
+        var createdId: Long? = null
         try {
+            val rec = repository.create(title, audioSource, meetingMode)
+            createdId = rec.id
+            repository.start(rec.id)
+            publish(RecordingPhase.STARTING, rec.id)
+
+            val engine = engineFactory.create(rec.id, outputDir, this)
             withContext(ioDispatcher) { engine.start() }
+
+            synchronized(segmentLock) {
+                closedSegments.clear()
+                lastSegmentFile = null
+            }
+            activeEngine = engine
+            activeRecordingId = rec.id
+            recordingStartWallMs = wallClock.nowMs()
+            recordingStartMs = monotonicClock.nowMs()
+            totalPausedMs = 0L
+            pauseStartMs = 0L
+            publish(RecordingPhase.RECORDING, rec.id)
+            rec
+        } catch (e: CancellationException) {
+            createdId?.let { runCatching { repository.delete(it) } }
+            resetSession()
+            publish(RecordingPhase.ERROR, null, "录音启动已取消")
+            throw e
         } catch (e: Exception) {
-            // 回滚：引擎启动失败时删除已创建的 DB 行（PC 语义：失败不残留脏记录）
-            repository.delete(rec.id)
+            // 回滚：启动失败时删除已创建的 DB 行（PC 语义：失败不残留脏记录）
+            createdId?.let { runCatching { repository.delete(it) } }
+            resetSession()
+            publish(RecordingPhase.ERROR, null, "录音启动失败：${e.message ?: "未知错误"}")
             throw e
         }
-
-        synchronized(segmentLock) {
-            closedSegments.clear()
-            lastSegmentFile = null
-        }
-        activeEngine = engine
-        activeRecordingId = rec.id
-        recordingStartWallMs = wallClock.nowMs()
-        recordingStartMs = monotonicClock.nowMs()
-        totalPausedMs = 0L
-        pauseStartMs = 0L
-        state = CoordinatorState.RECORDING
-        rec
     }
 
     /** 暂停：状态 RECORDING→PAUSED。仅在录音中生效，重复调用忽略（对齐 PC `pause_recording`）。 */
     suspend fun pause() = mutex.withLock {
-        if (state != CoordinatorState.RECORDING) return@withLock
+        if (phase != RecordingPhase.RECORDING) return@withLock
         val engine = activeEngine ?: return@withLock
         engine.pause()
         pauseStartMs = monotonicClock.nowMs()
-        state = CoordinatorState.PAUSED
+        publish(RecordingPhase.PAUSED, activeRecordingId)
     }
 
     /** 恢复：状态 PAUSED→RECORDING，累计本次暂停时长。仅在暂停中生效（对齐 PC `resume_recording`）。 */
     suspend fun resume() = mutex.withLock {
-        if (state != CoordinatorState.PAUSED) return@withLock
+        if (phase != RecordingPhase.PAUSED) return@withLock
         val engine = activeEngine ?: return@withLock
         engine.resume()
         if (pauseStartMs != 0L) {
             totalPausedMs += monotonicClock.nowMs() - pauseStartMs
             pauseStartMs = 0L
         }
-        state = CoordinatorState.RECORDING
+        publish(RecordingPhase.RECORDING, activeRecordingId)
     }
 
     /**
      * 停止录音（对齐 PC `stop_recording`）：
      * 1. 收尾进行中的暂停；
      * 2. 引擎 stop（finalize 段文件，同步送达最后一段 onSegmentClosed）；
-     * 3. 段文件按引擎回调顺序落库 [RecordingStore.addSegment]（时间轴按 PCM 载荷时长累加，
-     *    暂停期间不写 PCM 故自然扣除）；单段场景另存为整段 WAV（recordings/rec_*.wav）；
-     * 4. 状态落库 COMPLETED，返回录音时长（秒）。
+     * 3. 全部段文件按引擎回调顺序落库 [RecordingStore.addSegment]（时间轴按 PCM 载荷时长累加，
+     *    暂停期间不写 PCM 故自然扣除）——单段/多段一视同仁，保证数据完整性；
+     * 4. 状态落库 COMPLETED；
+     * 5. 停止流程最后环节统一触发整段合并 [RecordingStore.finalizeSegmented]（覆盖所有录音段场景）：
+     *    WAV 头/时长校验通过后落盘为 `recordings/rec_*.wav` 并清理段文件；合并或校验失败时
+     *    保留全部原始分段、停止流程照常完成，错误经 [errorListener] 上报，可调用
+     *    [finalizeSegmented] 重试合并；
+     * 6. 返回录音时长（秒）。
      *
      * @throws IllegalStateException 无活动录音
      */
     suspend fun stop(): Double = mutex.withLock {
-        check(state == CoordinatorState.RECORDING || state == CoordinatorState.PAUSED) {
-            "无活动录音（state=$state）"
-        }
-        // 收尾进行中的暂停
-        if (state == CoordinatorState.PAUSED && pauseStartMs != 0L) {
-            totalPausedMs += monotonicClock.nowMs() - pauseStartMs
-            pauseStartMs = 0L
+        check(phase == RecordingPhase.RECORDING || phase == RecordingPhase.PAUSED) {
+            "无活动录音（phase=$phase）"
         }
         val engine = checkNotNull(activeEngine) { "引擎缺失" }
         val recordingId = checkNotNull(activeRecordingId) { "录音 id 缺失" }
+        val wasPaused = phase == RecordingPhase.PAUSED
+        publish(RecordingPhase.STOPPING, recordingId)
 
-        withContext(ioDispatcher) { engine.stop() }
-        val segments = drainClosedSegments()
+        // 收尾进行中的暂停
+        if (wasPaused && pauseStartMs != 0L) {
+            totalPausedMs += monotonicClock.nowMs() - pauseStartMs
+            pauseStartMs = 0L
+        }
 
-        // 段落库：按 PCM 载荷算时长（暂停不写 PCM → 音频时间轴自然扣除暂停）
-        val loaded = segments.map { seg ->
-            seg to withContext(ioDispatcher) { seg.file.readBytes() }
-        }
-        var cursor = 0.0
-        for ((seg, bytes) in loaded) {
-            val payloadSize = maxOf(0, bytes.size - WavFileWriter.HEADER_SIZE)
-            val duration = payloadSize / BYTES_PER_SECOND.toDouble()
-            repository.addSegment(recordingId, seg.index, bytes, cursor, cursor + duration, duration)
-            cursor += duration
-        }
-        // 单段场景：段文件即整段 WAV，落库为 recordings/rec_*.wav（多段合并为 todo 17）
-        if (loaded.size == 1) {
-            repository.store(recordingId, "recording.wav", loaded[0].second)
-        }
-        repository.stop(recordingId, cursor)
+        try {
+            withContext(ioDispatcher) { engine.stop() }
+            val segments = drainClosedSegments()
 
-        // 复位会话（时长已随 stop 落库 audio_duration_seconds）
-        activeEngine = null
-        activeRecordingId = null
-        recordingStartWallMs = 0L
-        recordingStartMs = 0L
-        totalPausedMs = 0L
-        pauseStartMs = 0L
-        state = CoordinatorState.COMPLETED
-        cursor
+            // 段落库：按 PCM 载荷算时长（暂停不写 PCM → 音频时间轴自然扣除暂停）
+            val loaded = segments.map { seg ->
+                seg to withContext(ioDispatcher) { seg.file.readBytes() }
+            }
+            var cursor = 0.0
+            for ((seg, bytes) in loaded) {
+                val payloadSize = maxOf(0, bytes.size - WavFileWriter.HEADER_SIZE)
+                val duration = payloadSize / BYTES_PER_SECOND.toDouble()
+                repository.addSegment(recordingId, seg.index, bytes, cursor, cursor + duration, duration)
+                cursor += duration
+            }
+            // 先落 COMPLETED（时长/完成时间），合并失败也不影响录音记录本身的完整性
+            repository.stop(recordingId, cursor)
+
+            // 收尾合并：单段/多段统一走 finalizeSegmented（校验通过才清理段文件）
+            try {
+                withContext(ioDispatcher) { repository.finalizeSegmented(recordingId, cursor) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 合并/校验失败：原始分段完整保留，录音仍置 COMPLETED；可经 finalizeSegmented 重试
+                errorListener?.invoke(e)
+            }
+
+            resetSession()
+            publish(RecordingPhase.COMPLETED, recordingId)
+            cursor
+        } catch (e: CancellationException) {
+            resetSession()
+            throw e
+        } catch (e: Exception) {
+            // 引擎/落库失败：会话不可继续，置 ERROR（保留原因供 UI 提示），由调用方决定重试
+            resetSession()
+            publish(RecordingPhase.ERROR, null, "录音保存失败：${e.message ?: "未知错误"}")
+            throw e
+        }
     }
 
     // ---------- 附件 ----------
@@ -274,8 +358,8 @@ class RecordingCoordinator(
         source: AttachmentSource = AttachmentSource.CAMERA,
         attachmentType: AttachmentType = AttachmentType.IMAGE,
     ): RecordingAttachmentEntity? = mutex.withLock {
-        check(state == CoordinatorState.RECORDING || state == CoordinatorState.PAUSED) {
-            "无活动录音（state=$state）"
+        check(phase == RecordingPhase.RECORDING || phase == RecordingPhase.PAUSED) {
+            "无活动录音（phase=$phase）"
         }
         val recordingId = checkNotNull(activeRecordingId) { "录音 id 缺失" }
         repository.addAttachment(
@@ -297,7 +381,7 @@ class RecordingCoordinator(
      * 结果与纯墙钟差一致。下限 0；未录音返回 0.0（对齐 PC `photo_timestamp` 的 0.0 兜底语义）。
      */
     fun alignedTimestampSeconds(photoWallClockMs: Long): Double {
-        if (state != CoordinatorState.RECORDING && state != CoordinatorState.PAUSED) return 0.0
+        if (phase != RecordingPhase.RECORDING && phase != RecordingPhase.PAUSED) return 0.0
         if (recordingStartWallMs == 0L || recordingStartMs == 0L) return 0.0
         val paused = pausedIncludingInProgress()
         val wallDriftMs =
@@ -314,20 +398,26 @@ class RecordingCoordinator(
      */
     suspend fun delete(recordingId: Long) = mutex.withLock {
         val active = activeRecordingId
-        if ((state == CoordinatorState.RECORDING || state == CoordinatorState.PAUSED) && recordingId == active) {
+        if ((phase == RecordingPhase.RECORDING || phase == RecordingPhase.PAUSED) && recordingId == active) {
             throw IllegalStateException("不能删除正在录音的会话（recordingId=$recordingId）")
         }
         repository.delete(recordingId)
         if (recordingId == active) {
-            activeRecordingId = null
-            activeEngine = null
-            state = CoordinatorState.IDLE
+            resetSession()
+            publish(RecordingPhase.IDLE)
         }
     }
 
-    /** 分段录音收尾（对齐 PC `finalize_segmented_recording`）：委托数据层合并段文件并置 COMPLETED。 */
+    /**
+     * 合并重试入口（对齐 PC `finalize_segmented_recording`）：委托数据层合并段文件并清理。
+     *
+     * [stop] 内已自动调用一次；若当时合并/校验失败（段文件已保留、audioPath 未更新），
+     * 调用方可用录音的 `audioDurationSeconds` 作为 [totalDuration] 重新调用本方法。
+     *
+     * @throws IllegalStateException 合并或校验失败（段文件保持不变）
+     */
     suspend fun finalizeSegmented(recordingId: Long, totalDuration: Double): String? =
-        repository.finalizeSegmented(recordingId, totalDuration)
+        withContext(ioDispatcher) { repository.finalizeSegmented(recordingId, totalDuration) }
 
     // ---------- 引擎事件（引擎线程或调用线程） ----------
 
@@ -352,6 +442,21 @@ class RecordingCoordinator(
     }
 
     // ---------- 内部 ----------
+
+    /** 发布会话状态（仅在 [mutex] 保护内调用，保证状态流转有序）。 */
+    private fun publish(phase: RecordingPhase, recordingId: Long? = null, errorMessage: String? = null) {
+        _sessionState.value = RecordingSessionState(phase, recordingId, errorMessage)
+    }
+
+    /** 复位会话计时/引擎引用（不动 [sessionState]，由调用方发布目标阶段）。 */
+    private fun resetSession() {
+        activeEngine = null
+        activeRecordingId = null
+        recordingStartWallMs = 0L
+        recordingStartMs = 0L
+        totalPausedMs = 0L
+        pauseStartMs = 0L
+    }
 
     private fun pausedIncludingInProgress(): Long {
         val inProgress = if (pauseStartMs != 0L) monotonicClock.nowMs() - pauseStartMs else 0L

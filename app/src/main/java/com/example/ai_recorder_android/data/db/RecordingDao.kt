@@ -180,6 +180,19 @@ interface RecordingDao {
     @Query("SELECT * FROM recordings WHERE id = :id")
     suspend fun getRecordingWithRelations(id: Long): RecordingWithRelations?
 
+    // ---------- 后处理恢复 ----------
+
+    /**
+     * 后处理恢复扫描：已停止（COMPLETED）但尚无 AI 笔记（summary 为空）的录音。
+     *
+     * 用于进程重启后补投 WorkManager 后处理链：录音停止时状态已置 COMPLETED，
+     * ASR 完成后 transcription 被写入、笔记完成后 summary 被写入；summary 为空
+     * 说明「转写/标题/笔记」链路尚未跑完。失败录音状态为 FAILED，不在扫描范围内
+     * （避免每次启动对坏文件重复发起云端调用）。
+     */
+    @Query("SELECT * FROM recordings WHERE status = 'COMPLETED' AND summary IS NULL ORDER BY created_at ASC")
+    suspend fun getRecordingsAwaitingPostProcessing(): List<RecordingEntity>
+
     // ---------- 内部 SQL（供 @Transaction 默认方法调用） ----------
 
     @Query(

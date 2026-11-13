@@ -65,7 +65,7 @@ class RecordingCoordinatorTest {
         assertEquals("应创建 PENDING 行", 1, store.created.size)
         assertEquals(listOf(rec.id), store.started)
         assertEquals(1, factory.engine.startCalls)
-        assertEquals(CoordinatorState.RECORDING, coordinator.currentState)
+        assertEquals(RecordingPhase.RECORDING, coordinator.sessionState.value.phase)
         assertEquals(rec.id, coordinator.currentRecordingId)
         assertTrue(factory.engine.isRecording)
     }
@@ -88,7 +88,8 @@ class RecordingCoordinatorTest {
         }
 
         assertEquals("引擎启动失败应回滚 DB 行", listOf(1L), store.deleted)
-        assertEquals(CoordinatorState.IDLE, coordinator.currentState)
+        assertEquals("启动失败应进入 ERROR（UI 据此提示并允许重试）", RecordingPhase.ERROR, coordinator.sessionState.value.phase)
+        assertNotNull("失败原因应回推 UI", coordinator.sessionState.value.errorMessage)
         assertNull(coordinator.currentRecordingId)
     }
 
@@ -98,11 +99,11 @@ class RecordingCoordinatorTest {
         monotonicClock.advance(10_000L)
 
         coordinator.pause()
-        assertEquals(CoordinatorState.PAUSED, coordinator.currentState)
+        assertEquals(RecordingPhase.PAUSED, coordinator.sessionState.value.phase)
         monotonicClock.advance(5_000L)
 
         coordinator.resume()
-        assertEquals(CoordinatorState.RECORDING, coordinator.currentState)
+        assertEquals(RecordingPhase.RECORDING, coordinator.sessionState.value.phase)
         assertEquals("暂停 5s 应累计", 5_000L, coordinator.pausedDurationMs)
         // 已过时长 = 15s 单调 - 5s 暂停
         assertEquals(10_000L, coordinator.elapsedMs())
@@ -111,7 +112,7 @@ class RecordingCoordinatorTest {
     @Test
     fun pause_whenIdleOrAlreadyPaused_isNoop() = runBlocking {
         coordinator.pause()
-        assertEquals(CoordinatorState.IDLE, coordinator.currentState)
+        assertEquals(RecordingPhase.IDLE, coordinator.sessionState.value.phase)
 
         coordinator.startRecording(tmp.newFolder())
         coordinator.pause()
@@ -129,7 +130,7 @@ class RecordingCoordinatorTest {
     }
 
     @Test
-    fun stop_completesFlow_storesSegmentsAndWavAndReturnsDuration() = runBlocking {
+    fun stop_singleSegment_persistsSegmentAndTriggersUnifiedMerge() = runBlocking {
         val rec = coordinator.startRecording(tmp.newFolder(), "a", AudioSource.MIC, false)
         // 模拟引擎关闭段 0：1 秒音频（16kHz/16-bit/mono → 32000 字节 PCM + 44 头）
         val segmentFile = wavFile(32_000)
@@ -138,25 +139,26 @@ class RecordingCoordinatorTest {
         val duration = coordinator.stop()
 
         assertEquals("时长应从 PCM 载荷计算", 1.0, duration, 1e-9)
-        assertEquals(CoordinatorState.COMPLETED, coordinator.currentState)
+        assertEquals(RecordingPhase.COMPLETED, coordinator.sessionState.value.phase)
         assertNull("stop 后无活动录音", coordinator.currentRecordingId)
         assertEquals(1, store.stopped.size)
         assertEquals(rec.id, store.stopped[0])
 
         val seg = store.segments.single()
-        assertEquals(0, seg.index)
+        assertEquals("单段也必须落库", 0, seg.index)
         assertEquals(0.0, seg.startTime, 1e-9)
         assertEquals(1.0, seg.endTime, 1e-9)
         assertEquals(1.0, seg.duration, 1e-9)
 
-        assertEquals("单段场景应落库整段 WAV", 1, store.stored.size)
-        assertEquals(rec.id, store.stored[0].first)
-        assertTrue(store.stored[0].third.contentEquals(segmentFile.readBytes()))
+        // 单段同样走统一合并入口（不再直接 store 原始段字节）
+        assertEquals("单段场景应触发合并", 1, store.finalized.size)
+        assertEquals(rec.id to 1.0, store.finalized.single())
+        assertTrue("单段不应再走 store()", store.stored.isEmpty())
     }
 
     @Test
     fun stop_multipleSegments_accumulatesAudioTimeline() = runBlocking {
-        coordinator.startRecording(tmp.newFolder())
+        val rec = coordinator.startRecording(tmp.newFolder())
         val seg0 = wavFile(16_000) // 0.5s
         val seg1 = wavFile(32_000) // 1.0s
         factory.engine.simulateSegmentClosed(0, seg0)
@@ -165,7 +167,7 @@ class RecordingCoordinatorTest {
         val duration = coordinator.stop()
 
         assertEquals(1.5, duration, 1e-9)
-        assertEquals(2, store.segments.size)
+        assertEquals("全部段必须落库", 2, store.segments.size)
         val s0 = store.segments[0]
         val s1 = store.segments[1]
         assertEquals(0.0, s0.startTime, 1e-9)
@@ -174,6 +176,38 @@ class RecordingCoordinatorTest {
         assertEquals("段 1 起点应为段 0 终点", 0.5, s1.startTime, 1e-9)
         assertEquals(1.5, s1.endTime, 1e-9)
         assertEquals(1.0, s1.duration, 1e-9)
+
+        assertEquals("多段场景应触发合并", 1, store.finalized.size)
+        assertEquals(rec.id to 1.5, store.finalized.single())
+        assertTrue("多段不再跳过整段 WAV", store.stored.isEmpty())
+    }
+
+    @Test
+    fun stop_mergeFailure_keepsSessionCompletedAndSupportsRetry() = runBlocking {
+        val errors = mutableListOf<Throwable>()
+        coordinator.errorListener = { errors += it }
+        val rec = coordinator.startRecording(tmp.newFolder())
+        factory.engine.simulateSegmentClosed(0, wavFile(16_000))
+        factory.engine.simulateSegmentClosed(1, wavFile(32_000))
+        store.failFinalize = true
+
+        val duration = coordinator.stop()
+
+        assertEquals("合并失败不改变时长计算", 1.5, duration, 1e-9)
+        assertEquals("合并失败仍需置 COMPLETED", RecordingPhase.COMPLETED, coordinator.sessionState.value.phase)
+        assertEquals("录音状态应已落库", listOf(rec.id), store.stopped)
+        assertEquals("全部段数据必须已落库", 2, store.segments.size)
+        assertTrue("失败后不得删除/覆盖任何段数据", store.stored.isEmpty())
+        assertEquals("合并失败应上报 errorListener", 1, errors.size)
+        assertTrue(errors[0] is IllegalStateException)
+
+        // 重试入口：仍可对同一录音重新触发合并
+        store.failFinalize = false
+        val locator = coordinator.finalizeSegmented(rec.id, duration)
+
+        assertNotNull("重试合并应成功", locator)
+        assertEquals(2, store.finalized.size)
+        assertEquals(rec.id to 1.5, store.finalized.last())
     }
 
     @Test
@@ -273,14 +307,17 @@ class RecordingCoordinatorTest {
 
     @Test
     fun finalizeSegmented_delegatesToStore() = runBlocking {
-        coordinator.startRecording(tmp.newFolder())
+        val rec = coordinator.startRecording(tmp.newFolder())
         factory.engine.simulateSegmentClosed(0, wavFile(0))
         coordinator.stop()
+        assertEquals("stop 已自动触发一次合并", 1, store.finalized.size)
 
         val locator = coordinator.finalizeSegmented(999L, totalDuration = 3.5)
 
         assertNotNull(locator)
-        assertEquals(999L to 3.5, store.finalized.single())
+        assertEquals(2, store.finalized.size)
+        assertEquals(rec.id to 0.0, store.finalized.first())
+        assertEquals(999L to 3.5, store.finalized.last())
     }
 
     // ---------- 会话事件 ----------
@@ -319,6 +356,9 @@ class RecordingCoordinatorTest {
         val attachments = mutableListOf<AttachmentCall>()
         val finalized = mutableListOf<Pair<Long, Double>>()
         var nextId = 1L
+
+        /** true 时 finalizeSegmented 抛错（模拟合并/校验失败）。 */
+        var failFinalize = false
 
         data class SegmentCall(
             val recordingId: Long,
@@ -375,6 +415,7 @@ class RecordingCoordinatorTest {
 
         override suspend fun finalizeSegmented(recordingId: Long, totalDuration: Double): String? {
             finalized += recordingId to totalDuration
+            if (failFinalize) throw IllegalStateException("merge failed")
             return "recordings/rec_${recordingId}_merged.wav"
         }
 
