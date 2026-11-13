@@ -10,12 +10,15 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
  * RecordingDao 单测（in-memory Room）：
  * CRUD、created_at 倒序、按天分组、搜索、save_transcription 替换语义、
  * save_segment_transcription 的 MAX(chunk_index)+1 续编 + 时间偏移 + 文本累加、级联删除。
  */
+@RunWith(RobolectricTestRunner::class)
 class RecordingDaoTest {
 
     private lateinit var db: AppDatabase
@@ -151,9 +154,9 @@ class RecordingDaoTest {
     fun getRecordingsGroupedByDay_groupsByLocalDate() = runBlocking {
         val zone = ZoneId.of("Asia/Shanghai")
         // 2026-08-15T10:00 / 20:00 +08:00 与 2026-08-14T10:00 +08:00
-        val aug15Morning = 1_786_845_600_000L
-        val aug15Evening = 1_786_881_600_000L
-        val aug14Morning = 1_786_759_200_000L
+        val aug15Morning = 1_786_759_200_000L
+        val aug15Evening = 1_786_795_200_000L
+        val aug14Morning = 1_786_672_800_000L
 
         dao.insertRecording(recording(createdAt = aug15Evening, title = "晚间"))
         dao.insertRecording(recording(createdAt = aug14Morning, title = "昨日"))
@@ -204,7 +207,7 @@ class RecordingDaoTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
-    fun saveTranscription_recordingNotFound_throws() = runBlocking {
+    fun saveTranscription_recordingNotFound_throws() = runBlocking<Unit> {
         dao.saveTranscription(recordingId = 999L, transcriptionText = "x", chunks = emptyList())
     }
 
@@ -274,7 +277,7 @@ class RecordingDaoTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
-    fun saveSegmentTranscription_segmentNotFound_throws() = runBlocking {
+    fun saveSegmentTranscription_segmentNotFound_throws() = runBlocking<Unit> {
         val id = dao.insertRecording(recording(createdAt = 1_752_000_000_000L))
         dao.saveSegmentTranscription(recordingId = id, segmentIndex = 5, chunks = listOf(chunk(id, 0, "x")))
     }

@@ -100,7 +100,7 @@ class SftpUploader(private val config: SftpConfig) {
             localName: String,
             uuidHex: String = UUID.randomUUID().toString().replace("-", ""),
         ): String {
-            val ext = localName.substringAfterLast('.', "").let { if (it.isBlank()) "wav" else ".$it" }
+            val ext = localName.substringAfterLast('.', "").let { if (it.isBlank()) ".wav" else ".$it" }
             return "$uuidHex$ext"
         }
 

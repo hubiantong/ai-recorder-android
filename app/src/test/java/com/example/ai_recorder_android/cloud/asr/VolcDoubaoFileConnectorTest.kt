@@ -60,7 +60,7 @@ class VolcDoubaoFileConnectorTest {
 
     // ---- submit 请求体 DTO 序列化 ----
 
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
 
     @Test
     fun submitRequest_serializesFullBodyMatchingPc() {

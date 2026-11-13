@@ -170,11 +170,13 @@ fun DetailScreen(
     onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    // 优先显式参数；否则从导航参数读取（NavHost 内 LocalViewModelStoreOwner 即 NavBackStackEntry）
+    // 优先显式参数；否则从导航参数读取（NavHost 内 LocalViewModelStoreOwner 即 NavBackStackEntry）。
+    // 注意：Navigation 路径参数以 String 存入 arguments，必须 getString 后转 Long；
+    // getLong 会因类型不匹配返回 0L，导致恒查 id=0 而报"录音不存在"。
     val effectiveRecordingId = recordingId
         ?: (LocalViewModelStoreOwner.current as? NavBackStackEntry)?.arguments
-            ?.takeIf { it.containsKey("recordingId") }
-            ?.getLong("recordingId")
+            ?.getString("recordingId")
+            ?.toLongOrNull()
 
     val context = LocalContext.current
     val viewModel: DetailViewModel = viewModel(

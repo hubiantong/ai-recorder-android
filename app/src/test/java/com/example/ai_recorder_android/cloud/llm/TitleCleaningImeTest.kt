@@ -45,7 +45,8 @@ class TitleCleaningImeTest {
     @Test
     fun cleanTitle_stripsMixedPunctuationAndQuotes() {
         assertEquals("人工智能会议纪要", DeepSeekConnector.cleanTitle("《人工智能会议纪要》！"))
-        assertEquals("人工智能会议纪要", DeepSeekConnector.cleanTitle("「人工智能会议纪要。」"))
+        // 清洗顺序为先标点后引号（对齐 PC）：引号剥除后句号已不在句尾，故保留
+        assertEquals("人工智能会议纪要。", DeepSeekConnector.cleanTitle("「人工智能会议纪要。」"))
     }
 
     // ---------- emoji ----------

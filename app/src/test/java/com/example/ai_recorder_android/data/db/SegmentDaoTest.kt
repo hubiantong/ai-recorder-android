@@ -9,10 +9,13 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
  * SegmentDao 单测（in-memory Room）：insert/update/getByRecordingId/updateTranscriptionStatus。
  */
+@RunWith(RobolectricTestRunner::class)
 class SegmentDaoTest {
 
     private lateinit var db: AppDatabase

@@ -84,11 +84,12 @@ class VadSegmenterTest {
         }
         repeat(20) { vad.consumeFrame(silenceFrame()) } // 2s 静音收尾
 
-        // 段1 [0.0, 270.0]（maxSegment 强制截断）+ 段2 [270.0, 272.5]（静音截断）
+        // 段1 [0.0, 270.0]（maxSegment 强制截断）+ 段2 [270.1, 272.5]（静音截断）
+        // 段2 起点落在下一帧边界：帧粒度 0.1s（100ms）
         assertEquals(2, segments.size)
         assertEquals(0.0, segments[0].startTime, 0.05)
         assertEquals(270.0, segments[0].endTime, 0.05)
-        assertEquals(270.0, segments[1].startTime, 0.05)
+        assertEquals(270.1, segments[1].startTime, 0.05)
         assertEquals(272.5, segments[1].endTime, 0.05)
     }
 

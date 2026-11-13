@@ -105,6 +105,10 @@ class RecordingViewModel(
     init {
         // 音量电平回流：共享 coordinator 引擎线程回调 → UI 音量条
         coordinator.levelListener = { onLevel(it) }
+        // 实时转写回流：RecordingService（realtime 档）→ 主线程 → 字幕气泡
+        coordinator.transcriptListener = { partial, text ->
+            if (partial) onPartialTranscript(text) else onSentenceTranscript(text)
+        }
         scope.launch {
             userConfigRepository.userConfig.collect { config -> _tier.value = config.asrTier }
         }
@@ -145,26 +149,43 @@ class RecordingViewModel(
         context.startService(RecordingService.stopIntent(context))
     }
 
-    // ---------- 外部事件入口（onLevel 已接线；onPartialTranscript 待 todo 17） ----------
+    // ---------- 外部事件入口（onLevel 已接线；转写回流已接线 realtime 档） ----------
 
     /** 引擎 RMS 电平回调（0.0-1.0，越界钳制；经 Coordinator.levelListener 回流）。 */
     fun onLevel(rms: Double) {
         _rmsLevel.value = rms.toFloat().coerceIn(0f, 1f)
     }
 
-    /** 实时转写 partial 追加（todo 17 TranscriptionPipeline → 本方法）。 */
+    /**
+     * 实时转写中间结果（realtime 档流式 partial）：替换「正在识别」气泡（固定 id）。
+     */
     fun onPartialTranscript(text: String) {
         if (text.isBlank()) return
-        _partials.value = _partials.value + PartialTranscript(nextPartialId++, text)
+        val list = _partials.value.toMutableList()
+        val live = PartialTranscript(LIVE_PARTIAL_ID, text)
+        val index = list.indexOfFirst { it.id == LIVE_PARTIAL_ID }
+        if (index >= 0) list[index] = live else list.add(live)
+        _partials.value = list
+    }
+
+    /** 实时转写最终句：移除「正在识别」气泡并追加定稿句。 */
+    fun onSentenceTranscript(text: String) {
+        _partials.value = _partials.value
+            .filterNot { it.id == LIVE_PARTIAL_ID && text.isNotBlank() }
+            .let { if (text.isBlank()) it else it + PartialTranscript(nextPartialId++, text) }
     }
 
     override fun onCleared() {
         coordinator.levelListener = null
+        coordinator.transcriptListener = null
         scope.cancel()
         super.onCleared()
     }
 
     companion object {
+        /** 「正在识别」气泡的固定 id（负数避免与定稿句 id 冲突）。 */
+        private const val LIVE_PARTIAL_ID = -1L
+
         /** 生产工厂：Context 装配共享 RecordingCoordinator（App 单例）+ UserConfigRepository。 */
         fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
             initializer {

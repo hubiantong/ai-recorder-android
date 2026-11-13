@@ -9,6 +9,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
  * Room 建库冒烟单测（in-memory）：建库 → 插入 Recording + 关联 chunk → 断言读回。
@@ -17,6 +19,7 @@ import org.junit.Test
  * 需在 build.gradle.kts 补 `testImplementation(libs.androidx.test.core)`——
  * todo 4 禁止改 build.gradle.kts，该依赖请在 todo 5 配置 schema 导出时一并补加。
  */
+@RunWith(RobolectricTestRunner::class)
 class RecordingDbSmokeTest {
 
     private lateinit var db: AppDatabase

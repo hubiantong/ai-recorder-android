@@ -60,6 +60,7 @@ class E2eTiersTest {
         )
         val latch = CountDownLatch(1)
         val partials = CopyOnWriteArrayList<String>()
+        val sentences = CopyOnWriteArrayList<String>()
         val errors = AtomicReference<Throwable?>()
         val connector = DashScopeRealtimeConnector(
             apiKey = BuildConfig.DASHSCOPE_API_KEY,
@@ -69,17 +70,31 @@ class E2eTiersTest {
                     if (text.isNotBlank()) latch.countDown()
                 }
 
+                // 短音频（~2s）服务端可能跳过中间 partial 直接给最终句：
+                // 生产 RealtimeTranscriptionPipeline 以句子落库为准，这里同样接受 sentence
+                override fun onSentence(text: String, beginTimeMs: Int?, endTimeMs: Int?) {
+                    sentences.add(text)
+                    if (text.isNotBlank()) latch.countDown()
+                }
+
                 override fun onError(error: Throwable) {
                     errors.set(error)
                     latch.countDown()
                 }
             },
         )
+        connector.debugFrameLogger = { println("WS-DIAG $it") }
 
         connector.connect()
         // 发送夹具 PCM（16kHz int16 mono 小端；连接器内部降采样 8kHz 并分帧，
         // task-started 前自动缓冲）
-        extractPcm16k(fixtureWav).chunked(3200).forEach { connector.sendPcm16k(it) }
+        val pcm = extractPcm16k(fixtureWav)
+        var offset = 0
+        while (offset < pcm.size) {
+            val end = minOf(offset + 3200, pcm.size)
+            connector.sendPcm16k(pcm.copyOfRange(offset, end))
+            offset = end
+        }
 
         val done = latch.await(REALTIME_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         connector.finish()
@@ -87,12 +102,9 @@ class E2eTiersTest {
 
         errors.get()?.let { throw it }
         assertTrue(
-            "realtime 档应在 ${REALTIME_TIMEOUT_SECONDS}s 内收到 partial 回调",
-            done,
-        )
-        assertTrue(
-            "realtime 档 partial 文本应非空，实际: $partials",
-            partials.any { it.isNotBlank() },
+            "realtime 档应在 ${REALTIME_TIMEOUT_SECONDS}s 内收到 partial/sentence 回调" +
+                "（partials=$partials, sentences=$sentences）",
+            done && (partials.any { it.isNotBlank() } || sentences.any { it.isNotBlank() }),
         )
     }
 

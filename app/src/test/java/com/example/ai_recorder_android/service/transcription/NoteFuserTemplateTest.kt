@@ -10,15 +10,12 @@ import com.example.ai_recorder_android.data.db.TranscriptChunkEntity
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import okhttp3.Call
-import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
-import okhttp3.Timeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -38,10 +35,15 @@ class NoteFuserTemplateTest {
 
     private fun worker(connector: DeepSeekConnector) = NoteFusionWorker(connector, store)
 
-    private fun noKeyConnector(): DeepSeekConnector = DeepSeekConnector(apiKey = "")
+    /**
+     * 无 key 场景：注入总是返回 500 的 client，让主用 GLM（本机可能配置了真实 key）
+     * 与备用 DeepSeek 都确定性失败，不触网，稳定回退规则模板笔记。
+     */
+    private fun noKeyConnector(): DeepSeekConnector =
+        DeepSeekConnector(apiKey = "", client = stubClient(500, "LLM unavailable"))
 
-    private fun llmConnector(response: Response): DeepSeekConnector =
-        DeepSeekConnector(apiKey = "test-key", client = OkHttpClient.Builder().callFactory(FakeCallFactory(response)).build())
+    private fun llmConnector(code: Int, body: String): DeepSeekConnector =
+        DeepSeekConnector(apiKey = "test-key", client = stubClient(code, body))
 
     private fun chunks(): List<TranscriptChunkEntity> = listOf(
         TranscriptChunkEntity(
@@ -98,7 +100,7 @@ class NoteFuserTemplateTest {
 
     @Test
     fun `LLM HTTP 500 时回退模板笔记`() = runBlocking {
-        val connector = llmConnector(jsonResponse(500, "Internal Server Error"))
+        val connector = llmConnector(500, "Internal Server Error")
         val note = worker(connector).generateNote(
             recordingId = 1L,
             title = "周会",
@@ -116,7 +118,7 @@ class NoteFuserTemplateTest {
 
     @Test
     fun `LLM 返回空白内容时回退模板笔记`() = runBlocking {
-        val connector = llmConnector(jsonResponse(200, chatJson("")))
+        val connector = llmConnector(200, chatJson(""))
         val note = worker(connector).generateNote(
             recordingId = 1L,
             title = "周会",
@@ -182,9 +184,11 @@ class NoteFuserTemplateTest {
                 ),
             )
         )
-        val text1 = note.indexOf("[10s] 讨论需求")
-        val photo = note.indexOf("[15s] [照片] 白板图")
-        val text2 = note.indexOf("[30s] 确定排期")
+        // 关键要点节同样带 [Ns] 前缀，须从时间轴节内起查，避免 indexOf 命中前一节
+        val timelineStart = note.indexOf("## 时间轴要点")
+        val text1 = note.indexOf("[10s] 讨论需求", timelineStart)
+        val photo = note.indexOf("[15s] [照片] 白板图", timelineStart)
+        val text2 = note.indexOf("[30s] 确定排期", timelineStart)
         assertTrue(text1 in 0 until photo)
         assertTrue(photo in 0 until text2)
     }
@@ -198,32 +202,20 @@ class NoteFuserTemplateTest {
             )
         )
 
-    private fun jsonResponse(code: Int, body: String): Response =
+    private fun jsonResponse(code: Int, body: String, request: Request): Response =
         Response.Builder()
-            .request(Request.Builder().url(DeepSeekConnector.DEFAULT_BASE_URL).build())
+            .request(request)
             .protocol(Protocol.HTTP_1_1)
             .code(code)
             .message(if (code == 200) "OK" else "Error")
             .body(body.toResponseBody("application/json".toMediaType()))
             .build()
 
-    private class FakeCallFactory(private val response: Response) : Call.Factory {
-        override fun newCall(request: Request): Call = FakeCall(request, response)
-    }
-
-    private class FakeCall(
-        private val request: Request,
-        private val response: Response,
-    ) : Call {
-        override fun request(): Request = request
-        override fun execute(): Response = response
-        override fun enqueue(responseCallback: Callback) = responseCallback.onResponse(this, response)
-        override fun cancel() {}
-        override fun isCanceled(): Boolean = false
-        override fun isExecuted(): Boolean = true
-        override fun clone(): Call = FakeCall(request, response)
-        override fun timeout(): Timeout = Timeout()
-    }
+    /** 对任意请求返回固定响应的 client（OkHttp 5 已移除 Builder.callFactory，改用拦截器）。 */
+    private fun stubClient(code: Int, body: String): OkHttpClient =
+        OkHttpClient.Builder()
+            .addInterceptor { chain -> jsonResponse(code, body, chain.request()) }
+            .build()
 
     private class FakeTranscriptionStore : TranscriptionStore {
         val saveSummaryCalls = mutableListOf<Pair<Long, String>>()

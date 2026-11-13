@@ -18,15 +18,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
- * UserConfigRepository 单测（纯 JVM，`PreferenceDataStoreFactory` 临时文件注入）：
+ * UserConfigRepository 单测（Robolectric，`PreferenceDataStoreFactory` 临时文件注入）：
  * 空库默认值、全字段写→读回、脏数据 tier 回退 `free`（读路径）、
  * setter 清洗（写路径）、写→"重启"读回（scope 取消后重建实例）。
  *
- * 注意：同一文件同时存在多个 DataStore 实例会抛 IllegalStateException，
- * 故"重启"测试用显式 scope + cancel 释放文件后再重建。
+ * 为什么需要 Robolectric：DataStore 写入的收尾是 `atomicMoveTo(scratch, 目标文件)`，
+ * 其实现按 `Build.VERSION.SDK_INT` 分派——纯 JVM 单测下 SDK_INT=0 走 `File.renameTo`，
+ * 而 Windows 上 renameTo 无法覆盖已存在的目标文件，导致"第二次及以后的写"必失败；
+ * Robolectric 下 SDK_INT=36 走 `Files.move(REPLACE_EXISTING)`，连续写正常。
+ *
+ * 注意：同一文件同时存在多个活跃 DataStore 实例会抛 IllegalStateException，
+ * 故"重启"测试用显式 scope + cancel（completion 回调同步关闭连接释放注册）后再重建。
  */
+@RunWith(RobolectricTestRunner::class)
 class UserConfigRepositoryTest {
 
     @get:Rule

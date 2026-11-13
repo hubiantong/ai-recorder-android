@@ -117,6 +117,15 @@ class RecordingCoordinator(
     /** 音量电平监听（todo 19 接 UI 波形）；引擎线程回调。 */
     var levelListener: ((Double) -> Unit)? = null
 
+    /** 录音中 16kHz PCM 帧监听（引擎线程回调，实时转写投递用；调用方保证非阻塞）。 */
+    var pcmListener: ((ByteArray) -> Unit)? = null
+
+    /**
+     * 实时转写文本监听：`partial=true` 为中间结果（替换式更新）、false 为最终句。
+     * 调用方（RecordingService）保证已切主线程。
+     */
+    var transcriptListener: ((partial: Boolean, text: String) -> Unit)? = null
+
     /** 引擎错误监听（todo 19 接 UI/兜底）；引擎线程回调。 */
     var errorListener: ((Throwable) -> Unit)? = null
 
@@ -324,6 +333,10 @@ class RecordingCoordinator(
 
     override fun onLevel(rms: Double) {
         levelListener?.invoke(rms)
+    }
+
+    override fun onPcmFrame(pcm: ByteArray) {
+        pcmListener?.invoke(pcm)
     }
 
     override fun onSegmentClosed(index: Int, file: File, durationMs: Long) {

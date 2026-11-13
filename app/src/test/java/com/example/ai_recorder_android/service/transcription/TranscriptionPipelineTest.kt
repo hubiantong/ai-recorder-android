@@ -122,7 +122,10 @@ class TranscriptionPipelineTest {
             runBlocking { pipeline.transcribe(1L, loudWav(1.0), "free", vadEnabled = false) }
         }
         assertTrue(ex.message!!.contains("mock 全失败"))
-        assertEquals(1L to "mock 全失败", store.recordingFailedCalls.single())
+        // 主源码落库的失败信息带异常包装前缀（"ASR 服务调用失败（HTTP 500）: ..."），只约束原始信息在内
+        val failure = store.recordingFailedCalls.single()
+        assertEquals(1L, failure.first)
+        assertTrue(failure.second!!.contains("mock 全失败"))
     }
 
     // =====================================================================================

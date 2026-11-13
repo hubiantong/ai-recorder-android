@@ -48,6 +48,12 @@ class AudioRecorderEngine(
 
         /** 读循环异常（如 AudioRecord 读失败）；引擎已尽力关闭段文件。 */
         fun onError(error: Throwable)
+
+        /**
+         * 录音中的 16kHz/16-bit/mono PCM 帧（小端，100ms 一帧，引擎线程回调），
+         * 供实时转写（todo 17）投递流式 ASR；暂停期间不回调。默认空实现（无需 PCM 的场景零成本）。
+         */
+        fun onPcmFrame(pcm: ByteArray) {}
     }
 
     enum class State { IDLE, RECORDING, PAUSED }
@@ -268,6 +274,8 @@ class AudioRecorderEngine(
                             activeSegment?.write(buffer, read, byteBuffer, pcmBytes)
                         }
                         callbacks.onLevel(computeRms(buffer, read))
+                        // 实时转写投递（write 后 pcmBytes 前 read*2 字节即本帧小端 PCM）
+                        callbacks.onPcmFrame(pcmBytes.copyOf(read * 2))
                     }
                     State.IDLE -> break // stop() 已置 IDLE，退出循环
                 }

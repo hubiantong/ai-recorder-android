@@ -61,12 +61,13 @@ interface RecordingDao {
 
     /**
      * 按标题/转写内容搜索（对齐 PC `search_recordings`：title OR transcription LIKE）。
-     * 空白查询返回全部。SQLite LIKE 对 ASCII 大小写不敏感（与 PC ilike 行为一致）。
+     * 空白（trim 后为空）查询返回全部。SQLite LIKE 对 ASCII 大小写不敏感（与 PC ilike 行为一致）。
      */
     @Query(
         """
         SELECT * FROM recordings
-        WHERE title LIKE '%' || :query || '%'
+        WHERE trim(:query) = ''
+           OR title LIKE '%' || :query || '%'
            OR transcription LIKE '%' || :query || '%'
         ORDER BY created_at DESC
         """,

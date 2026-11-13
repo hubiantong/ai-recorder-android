@@ -71,7 +71,7 @@ class RecordingCoordinatorTest {
     }
 
     @Test
-    fun startRecording_whileActive_throwsIllegalState() = runBlocking {
+    fun startRecording_whileActive_throwsIllegalState() = runBlocking<Unit> {
         coordinator.startRecording(tmp.newFolder())
 
         assertThrows(IllegalStateException::class.java) {
@@ -151,7 +151,7 @@ class RecordingCoordinatorTest {
 
         assertEquals("单段场景应落库整段 WAV", 1, store.stored.size)
         assertEquals(rec.id, store.stored[0].first)
-        assertTrue(store.stored[0].second.contentEquals(segmentFile.readBytes()))
+        assertTrue(store.stored[0].third.contentEquals(segmentFile.readBytes()))
     }
 
     @Test
@@ -180,17 +180,19 @@ class RecordingCoordinatorTest {
     fun stop_afterPause_timestampAlignmentAndDurationExcludePause() = runBlocking {
         val rec = coordinator.startRecording(tmp.newFolder())
         monotonicClock.advance(10_000L)
+        wallClock.advance(10_000L) // 时钟未调整：墙钟与单调同步推进（漂移 0）
         coordinator.pause()
-        monotonicClock.advance(10_000L) // 暂停 10s
+        monotonicClock.advance(10_000L)
+        wallClock.advance(10_000L) // 暂停 10s
         coordinator.resume()
         factory.engine.simulateSegmentClosed(0, wavFile(32_000))
 
-        // 拍照时刻：暂停 10s 后继续录音，拍照墙钟在暂停开始后 25s
-        val photoWallMs = wallClock.nowMs() + 25_000L
-        wallClock.advance(25_000L)
-        val aligned = coordinator.alignedTimestampSeconds(photoWallMs)
+        // 拍照时刻：resume 后再走 5s（双钟同步推进），拍照墙钟 = 开始后 25s
+        monotonicClock.advance(5_000L)
+        wallClock.advance(5_000L)
+        val photoWallMs = wallClock.nowMs()
 
-        assertEquals("25s 墙钟 - 10s 暂停 = 15s", 15.0, aligned, 1e-9)
+        assertEquals("25s 墙钟 - 10s 暂停 = 15s", 15.0, coordinator.alignedTimestampSeconds(photoWallMs), 1e-9)
 
         val duration = coordinator.stop()
         assertEquals("时长不含暂停", 1.0, duration, 1e-9)
@@ -203,10 +205,13 @@ class RecordingCoordinatorTest {
     fun addAttachment_alignsTimestampAndDelegatesToStore() = runBlocking {
         val rec = coordinator.startRecording(tmp.newFolder())
         monotonicClock.advance(10_000L)
+        wallClock.advance(10_000L) // 时钟未调整：双钟同步
         coordinator.pause()
         monotonicClock.advance(10_000L)
+        wallClock.advance(10_000L) // 暂停 10s
         coordinator.resume()
-        wallClock.advance(35_000L)
+        monotonicClock.advance(15_000L)
+        wallClock.advance(15_000L) // resume 后 15s，拍照墙钟 = 开始后 35s
 
         val att = coordinator.addAttachment(
             photoWallClockMs = wallClock.nowMs(),

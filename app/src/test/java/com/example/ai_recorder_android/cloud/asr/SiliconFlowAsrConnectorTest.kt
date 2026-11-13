@@ -3,16 +3,15 @@ package com.example.ai_recorder_android.cloud.asr
 import com.example.ai_recorder_android.cloud.asr.dto.OpenAiWhisperResponse
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.decodeFromString
-import okhttp3.Call
-import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
-import okhttp3.Timeout
+import okio.Buffer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -21,6 +20,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * SiliconFlowAsrConnector 纯 JVM 单测（JUnit4，不依赖 Android 环境）。
@@ -96,32 +96,34 @@ class SiliconFlowAsrConnectorTest {
         }
     }
 
-    // ---- 请求构建 + 响应解析（fake Call.Factory） ----
+    // ---- 请求构建 + 响应解析（拦截器捕获请求，替代 mockwebserver，零额外依赖） ----
 
     @Test
     fun transcribe_buildsMultipartRequestAndParsesResponse() = runBlocking {
         val fixtureWav = fixtureFile("/fixtures/test_3s_known.wav")
         val jsonText = readFixture("/fixtures/whisper_verbose_json_sample.json")
-        val factory = FakeCallFactory(jsonResponse(200, jsonText))
         val connector = SiliconFlowAsrConnector(
             apiKey = "test-key",
-            client = OkHttpClient.Builder().callFactory(factory).build(),
+            client = capturingClient(200, jsonText),
         )
 
         val resp = connector.transcribe(fixtureWav, language = "zh")
 
-        val request = factory.lastRequest ?: fail("未发起请求")
+        val request = capturedRequest.get() ?: error("未发起请求")
         assertEquals(SiliconFlowAsrConnector.ENDPOINT, request.url.toString())
         assertEquals("POST", request.method)
         assertEquals("Bearer test-key", request.header("Authorization"))
 
         val multipart = request.body as MultipartBody
-        assertEquals(MultipartBody.FORM, multipart.type())
-        assertEquals("FunAudioLLM/SenseVoiceSmall", multipart.partNamed("model")!!.body.buffer().readUtf8())
-        assertEquals("verbose_json", multipart.partNamed("response_format")!!.body.buffer().readUtf8())
-        assertEquals("zh", multipart.partNamed("language")!!.body.buffer().readUtf8())
+        assertEquals(MultipartBody.FORM, multipart.type)
+        assertEquals("FunAudioLLM/SenseVoiceSmall", multipart.partNamed("model")!!.body.utf8())
+        assertEquals("verbose_json", multipart.partNamed("response_format")!!.body.utf8())
+        assertEquals("zh", multipart.partNamed("language")!!.body.utf8())
         val filePart = multipart.partNamed("file")!!
-        assertTrue(filePart.headers["Content-Disposition"]!!.contains("filename=\"test_3s_known.wav\""))
+        assertTrue(
+            filePart.headers?.get("Content-Disposition")
+                ?.contains("filename=\"test_3s_known.wav\"") == true,
+        )
         assertEquals("audio/wav", filePart.body.contentType().toString())
 
         assertEquals("测试录音。", resp.text)
@@ -132,10 +134,9 @@ class SiliconFlowAsrConnectorTest {
     @Test
     fun transcribe_httpError_throwsAsrApiException() = runBlocking {
         val fixtureWav = fixtureFile("/fixtures/test_3s_known.wav")
-        val factory = FakeCallFactory(jsonResponse(401, """{"error":"invalid api key"}"""))
         val connector = SiliconFlowAsrConnector(
             apiKey = "bad-key",
-            client = OkHttpClient.Builder().callFactory(factory).build(),
+            client = capturingClient(401, """{"error":"invalid api key"}"""),
         )
         try {
             connector.transcribe(fixtureWav)
@@ -155,14 +156,31 @@ class SiliconFlowAsrConnectorTest {
 
     private fun readFixture(path: String): String =
         javaClass.getResourceAsStream(path)?.readBytes()?.toString(Charsets.UTF_8)
-            ?: fail("夹具缺失: $path")
+            ?: error("夹具缺失: $path")
 
     private fun fixtureFile(path: String): File =
         File(javaClass.getResource(path)!!.toURI())
 
-    private fun jsonResponse(code: Int, body: String): Response =
+    private val capturedRequest = AtomicReference<Request?>()
+
+    /** 捕获请求并返回固定响应的 client（OkHttp 5 已移除 Builder.callFactory，改用拦截器）。 */
+    private fun capturingClient(code: Int, body: String): OkHttpClient =
+        OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                capturedRequest.set(chain.request())
+                jsonResponse(code, body, chain.request())
+            }
+            .build()
+
+    private fun RequestBody.utf8(): String {
+        val sink = Buffer()
+        writeTo(sink)
+        return sink.readUtf8()
+    }
+
+    private fun jsonResponse(code: Int, body: String, request: Request): Response =
         Response.Builder()
-            .request(Request.Builder().url(SiliconFlowAsrConnector.ENDPOINT).build())
+            .request(request)
             .protocol(Protocol.HTTP_1_1)
             .code(code)
             .message(if (code == 200) "OK" else "Error")
@@ -170,30 +188,5 @@ class SiliconFlowAsrConnectorTest {
             .build()
 
     private fun MultipartBody.partNamed(name: String): MultipartBody.Part? =
-        parts.firstOrNull { it.headers["Content-Disposition"]?.contains("name=\"$name\"") == true }
-
-    /** 捕获最后一次请求并返回固定响应的 Call.Factory（替代 MockWebServer，零额外依赖）。 */
-    private class FakeCallFactory(private val response: Response) : Call.Factory {
-        var lastRequest: Request? = null
-            private set
-
-        override fun newCall(request: Request): Call {
-            lastRequest = request
-            return FakeCall(request, response)
-        }
-    }
-
-    private class FakeCall(
-        private val request: Request,
-        private val response: Response,
-    ) : Call {
-        override fun request(): Request = request
-        override fun execute(): Response = response
-        override fun enqueue(responseCallback: Callback) = responseCallback.onResponse(this, response)
-        override fun cancel() {}
-        override fun isCanceled(): Boolean = false
-        override fun isExecuted(): Boolean = true
-        override fun clone(): Call = FakeCall(request, response)
-        override fun timeout(): Timeout = Timeout()
-    }
+        parts.firstOrNull { it.headers?.get("Content-Disposition")?.contains("name=\"$name\"") == true }
 }

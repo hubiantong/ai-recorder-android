@@ -49,18 +49,18 @@ class RecordingServiceTest {
 
     @Test
     fun commandFor_mapsKnownActions() {
-        assertEquals(RecordingService.Command.START, RecordingService.commandFor(RecordingService.ACTION_START_RECORDING))
-        assertEquals(RecordingService.Command.STOP, RecordingService.commandFor(RecordingService.ACTION_STOP_RECORDING))
-        assertEquals(RecordingService.Command.PAUSE, RecordingService.commandFor(RecordingService.ACTION_PAUSE))
-        assertEquals(RecordingService.Command.RESUME, RecordingService.commandFor(RecordingService.ACTION_RESUME))
+        assertEquals(RecordingService.Companion.Command.START, RecordingService.commandFor(RecordingService.ACTION_START_RECORDING))
+        assertEquals(RecordingService.Companion.Command.STOP, RecordingService.commandFor(RecordingService.ACTION_STOP_RECORDING))
+        assertEquals(RecordingService.Companion.Command.PAUSE, RecordingService.commandFor(RecordingService.ACTION_PAUSE))
+        assertEquals(RecordingService.Companion.Command.RESUME, RecordingService.commandFor(RecordingService.ACTION_RESUME))
     }
 
     @Test
     fun commandFor_unknownOrNull_isUnknown() {
-        assertEquals(RecordingService.Command.UNKNOWN, RecordingService.commandFor(null))
-        assertEquals(RecordingService.Command.UNKNOWN, RecordingService.commandFor(""))
+        assertEquals(RecordingService.Companion.Command.UNKNOWN, RecordingService.commandFor(null))
+        assertEquals(RecordingService.Companion.Command.UNKNOWN, RecordingService.commandFor(""))
         assertEquals(
-            RecordingService.Command.UNKNOWN,
+            RecordingService.Companion.Command.UNKNOWN,
             RecordingService.commandFor("com.example.ai_recorder_android.action.NOPE"),
         )
     }

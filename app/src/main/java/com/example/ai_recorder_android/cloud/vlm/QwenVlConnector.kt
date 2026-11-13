@@ -22,8 +22,9 @@ import java.util.Base64
 import java.util.concurrent.TimeUnit
 
 /**
- * VLM 云端连接器：主用智谱 GLM-4.6V-Flash，备用 Qwen-VL（DashScope OpenAI 兼容模式）。
- * 主用失败（网络/非 2xx/业务错误）立即切换备用模型。
+ * VLM 云端连接器：主用智谱 GLM-4.6V-Flash，第二备用硅基流动 DeepSeek-OCR，
+ * 末级备用 Qwen-VL（DashScope OpenAI 兼容模式）。三者均为 OpenAI chat/completions 兼容协议。
+ * 前级失败（网络/非 2xx/业务错误）立即切换下一级。
  */
 class QwenVlConnector(
     private val apiKey: String = BuildConfig.DASHSCOPE_API_KEY,
@@ -84,8 +85,26 @@ class QwenVlConnector(
             }
         }
 
-        // ---- 备用：Qwen-VL ----
-        // 不可复用主用 payload：会把 GLM 模型名发给 DashScope（model not found）
+        // ---- 备用 1：硅基流动 DeepSeek-OCR ----
+        val secondaryError: Exception? = if (SILICONFLOW_API_KEY.isBlank()) {
+            IllegalStateException("SILICONFLOW_API_KEY 未配置（app/secrets.properties）")
+        } else {
+            try {
+                return@withContext describeViaSiliconFlow(
+                    imageUrl,
+                    prompt,
+                    contextText,
+                    maxTokens ?: this@QwenVlConnector.maxTokens,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                e
+            }
+        }
+
+        // ---- 备用 2：Qwen-VL ----
+        // 不可复用前级 payload：会把其他模型名发给 DashScope（model not found）
         try {
             val backupModel = this@QwenVlConnector.model
             callChat(
@@ -101,11 +120,26 @@ class QwenVlConnector(
             throw e
         } catch (e: Exception) {
             throw QwenVlException(
-                "VLM 调用失败（主用 GLM: ${primaryError?.message}；备用 Qwen-VL: ${e.message}）",
+                "VLM 调用失败（主用 GLM: ${primaryError?.message}；" +
+                    "备用 DeepSeek-OCR: ${secondaryError?.message}；备用 Qwen-VL: ${e.message}）",
                 e,
             )
         }
     }
+
+    /** 备用 1：硅基流动 DeepSeek-OCR（internal 供 E2E 单独验证该档）。 */
+    internal suspend fun describeViaSiliconFlow(
+        imageDataUrl: String,
+        prompt: String,
+        contextText: String?,
+        maxTokens: Int,
+    ): QwenVlResult = callChat(
+        baseUrl = SILICONFLOW_BASE_URL,
+        apiKey = SILICONFLOW_API_KEY,
+        model = SILICONFLOW_OCR_MODEL,
+        payload = buildRequestPayload(SILICONFLOW_OCR_MODEL, maxTokens, prompt, contextText, imageDataUrl),
+        provider = SILICONFLOW_PROVIDER_NAME,
+    )
 
     /** 构造请求 body JSON。 */
     private fun buildRequestPayload(
@@ -197,7 +231,15 @@ class QwenVlConnector(
         const val PRIMARY_MODEL = "glm-4.6v-flash"
         const val PRIMARY_PROVIDER_NAME = "glm_vl"
 
-        // ---- 备用：Qwen-VL（DashScope 兼容模式）----
+        // ---- 备用 1：硅基流动 DeepSeek-OCR（OpenAI 兼容 chat/completions）----
+        const val SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
+
+        /** 注入自 BuildConfig.SILICONFLOW_API_KEY（secrets.properties）；缺失为 ""。 */
+        val SILICONFLOW_API_KEY = BuildConfig.SILICONFLOW_API_KEY
+        const val SILICONFLOW_OCR_MODEL = "deepseek-ai/DeepSeek-OCR"
+        const val SILICONFLOW_PROVIDER_NAME = "siliconflow_ocr"
+
+        // ---- 备用 2：Qwen-VL（DashScope 兼容模式）----
         const val COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
         const val DEFAULT_MODEL = "qwen-vl-max"
         const val DEFAULT_MAX_TOKENS = 500

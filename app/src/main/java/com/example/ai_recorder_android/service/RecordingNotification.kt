@@ -97,4 +97,19 @@ object RecordingNotification {
         val seconds = totalSec % 60
         return "%02d:%02d".format(minutes, seconds)
     }
+
+    /**
+     * 构建「转写中」通知（录音停止后、云端转写完成前的过渡态）：无停止动作、不可清除。
+     * 复用 [NOTIFICATION_ID]（与录音通知互斥出现，服务存活期内先后替换）。
+     */
+    fun buildTranscribingNotification(context: Context, recordingId: Long): Notification =
+        NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle("语音转写")
+            .setContentText("正在转写录音 #$recordingId，完成后可在详情查看")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
 }

@@ -8,6 +8,7 @@ import com.example.ai_recorder_android.cloud.asr.dto.DashScopeRealtimeRunTaskPay
 import com.example.ai_recorder_android.core.audio.Resampler
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -26,7 +27,9 @@ import org.junit.Test
  */
 class DashScopeRealtimeConnectorTest {
 
-    private val json = Json { ignoreUnknownKeys = true }
+    // 与主源码 defaultJson 配置一致：默认值字段必须出现在帧中（官方协议要求），
+    // 可选参数为 null 时不序列化
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
 
     // ---------- 1. DTO 序列化 ----------
 

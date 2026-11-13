@@ -54,6 +54,20 @@ class DashScopeRealtimeConnector(
     private val messageHandler = DashScopeRealtimeMessageHandler(json, callback)
     private var webSocket: WebSocket? = null
 
+    /** 发送锁：串行化引擎线程 sendPcm16k 与 WS 线程 task-started/flush，保证帧序。 */
+    private val sendLock = Any()
+
+    /** task-started 前积压的完整帧（修复：切出的帧不得丢弃，started 后按序补发）。 */
+    private val pendingFrames = mutableListOf<ByteArray>()
+
+    /** 诊断钩子：原始 WS 事件帧（不含密钥）；null 时无开销。测试注入用。 */
+    @Volatile
+    var debugFrameLogger: ((String) -> Unit)? = null
+
+    private fun logFrame(message: String) {
+        debugFrameLogger?.invoke(message)
+    }
+
     /**
      * 建立 WebSocket 连接并发送 run-task。
      *
@@ -78,24 +92,31 @@ class DashScopeRealtimeConnector(
 
     /**
      * 发送 16kHz int16 mono PCM（小端）。内部降采样到 8kHz 并切分为
-     * [frameBytes] 大小的帧；task-started 之前的数据先缓冲，收到 task-started 后一并发送。
+     * [frameBytes] 大小的帧；task-started 之前的完整帧**积压待发**（不丢弃），
+     * 收到 task-started 后按序补发。
      */
-    fun sendPcm16k(pcm16k: ByteArray) {
+    fun sendPcm16k(pcm16k: ByteArray) = synchronized(sendLock) {
         check(!closed.get()) { "DashScopeRealtimeConnector is closed" }
         val resampled = Resampler.to8k(toShortArray(pcm16k))
         val frames = frameBuffer.add(toByteArray(resampled))
         if (taskStarted.get()) {
+            drainPending()
             frames.forEach { webSocket?.send(it.toByteString()) }
+        } else {
+            pendingFrames += frames
         }
     }
 
     /** 发送缓冲区内不足一帧的剩余 PCM（finish 前调用，避免尾部数据丢失）。 */
-    fun flush() {
+    fun flush() = synchronized(sendLock) {
         val remaining = frameBuffer.remaining()
         if (remaining.isNotEmpty()) {
             frameBuffer.clear()
             if (taskStarted.get()) {
+                drainPending()
                 webSocket?.send(remaining.toByteString())
+            } else {
+                pendingFrames += remaining
             }
         }
     }
@@ -109,6 +130,21 @@ class DashScopeRealtimeConnector(
         webSocket?.send(json.encodeToString(message))
     }
 
+    /** task-started 回调：置位并补发积压帧（持有 sendLock，顺序在先保证帧序）。 */
+    private fun onTaskStartedLocked() {
+        taskStarted.set(true)
+        drainPending()
+    }
+
+    /** 按序发送积压帧并清空（调用方持有 sendLock）。 */
+    private fun drainPending() {
+        if (pendingFrames.isNotEmpty()) {
+            val frames = pendingFrames.toList()
+            pendingFrames.clear()
+            frames.forEach { webSocket?.send(it.toByteString()) }
+        }
+    }
+
     /** 主动关闭连接（幂等）。 */
     fun close() {
         if (closed.compareAndSet(false, true)) {
@@ -118,6 +154,7 @@ class DashScopeRealtimeConnector(
 
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            logFrame("WS onOpen http=${response.code}")
             val message = DashScopeRealtimeRunTask(
                 header = DashScopeRealtimeClientHeader(action = "run-task", taskId = taskId),
                 payload = DashScopeRealtimeRunTaskPayload(
@@ -129,17 +166,24 @@ class DashScopeRealtimeConnector(
                     ),
                 ),
             )
-            webSocket.send(json.encodeToString(message))
+            val text = json.encodeToString(message)
+            logFrame("WS SEND: $text")
+            webSocket.send(text)
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            messageHandler.handle(text, onTaskStarted = {
-                taskStarted.set(true)
-                flush()
-            })
+            logFrame("WS RECV: $text")
+            messageHandler.handle(text, onTaskStarted = ::onTaskStartedLocked)
+        }
+
+        // 部分网关以二进制帧回 JSON 事件：同样按 UTF-8 文本解析，避免事件被静默丢弃
+        override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+            logFrame("WS RECV(binary ${bytes.size}B): ${bytes.utf8()}")
+            messageHandler.handle(bytes.utf8(), onTaskStarted = ::onTaskStartedLocked)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            logFrame("WS onFailure: ${t.message} http=${response?.code} body=${response?.message}")
             callback.onError(
                 DashScopeRealtimeException(
                     "DashScope realtime 连接失败: ${t.message}",
@@ -150,7 +194,12 @@ class DashScopeRealtimeConnector(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            logFrame("WS onClosed code=$code reason=$reason")
             callback.onClosed()
+        }
+
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            logFrame("WS onClosing code=$code reason=$reason")
         }
     }
 
@@ -196,7 +245,10 @@ class DashScopeRealtimeConnector(
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder().build()
 
-        private fun defaultJson(): Json = Json { ignoreUnknownKeys = true }
+        // encodeDefaults=true：官方协议要求 streaming=duplex / task_group / input 等默认值字段必须发送；
+        // explicitNulls=false：未启用的可选参数（language_hints 等）不序列化
+        private fun defaultJson(): Json =
+            Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
     }
 }
 

@@ -7,6 +7,11 @@ import com.example.ai_recorder_android.cloud.llm.dto.DeepSeekMessage
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -19,7 +24,24 @@ import org.junit.Test
  */
 class DeepSeekConnectorTest {
 
-    private fun noKeyConnector(): DeepSeekConnector = DeepSeekConnector(apiKey = "")
+    /**
+     * 无 key 场景：注入总是返回 500 的 client，让主用 GLM（本机可能配置了真实 key）
+     * 与备用 DeepSeek 都确定性失败，不触网，稳定验证回退逻辑。
+     */
+    private fun noKeyConnector(): DeepSeekConnector = DeepSeekConnector(apiKey = "", client = failingClient())
+
+    private fun failingClient(): OkHttpClient =
+        OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(500)
+                    .message("LLM unavailable")
+                    .body("LLM unavailable".toResponseBody("text/plain".toMediaType()))
+                    .build()
+            }
+            .build()
 
     // ---- 标题清洗（对齐 PC note_fuser.generate_title 清理正则）----
 
@@ -28,7 +50,7 @@ class DeepSeekConnectorTest {
         val raw = "关于人工智能在医疗领域的应用前景探讨" // 18 字
         val cleaned = DeepSeekConnector.cleanTitle(raw)
         assertTrue("清洗后应 ≤12 字，实际 ${cleaned.length}", cleaned.length <= 12)
-        assertEquals("关于人工智能在医疗领域的应用前", cleaned)
+        assertEquals("关于人工智能在医疗领域的", cleaned)
     }
 
     @Test
@@ -81,9 +103,11 @@ class DeepSeekConnectorTest {
         assertTrue(note.contains("## 关键要点"))
         assertTrue(note.contains("## 时间轴要点"))
         // 时间轴按时间合并排序：10s 文本 → 15s 照片 → 30s 文本
-        val textIdx = note.indexOf("[10s] 讨论需求优先级")
-        val photoIdx = note.indexOf("[15s] [照片] 白板上的架构图")
-        val text2Idx = note.indexOf("[30s] 确定排期")
+        // 关键要点节同样带 [Ns] 前缀，须从时间轴节内起查，避免 indexOf 命中前一节
+        val timelineStart = note.indexOf("## 时间轴要点")
+        val textIdx = note.indexOf("[10s] 讨论需求优先级", timelineStart)
+        val photoIdx = note.indexOf("[15s] [照片] 白板上的架构图", timelineStart)
+        val text2Idx = note.indexOf("[30s] 确定排期", timelineStart)
         assertTrue(textIdx in 0 until photoIdx)
         assertTrue(photoIdx in 0 until text2Idx)
     }
@@ -96,8 +120,10 @@ class DeepSeekConnectorTest {
         )
         assertTrue(note.contains("# 录音笔记")) // 无标题 → 默认标题
         assertTrue(note.contains("## 主题摘要"))
-        assertTrue(note.contains("字".repeat(200) + "..."))
-        assertFalse(note.contains("字".repeat(201)))
+        // 截断只约束"主题摘要"节：关键要点节按行原样列出（可含超 200 字的行），不能全篇断言
+        val summary = note.substringAfter("## 主题摘要").substringBefore("## 关键要点")
+        assertTrue(summary.contains("字".repeat(200) + "..."))
+        assertFalse(summary.contains("字".repeat(201)))
     }
 
     @Test

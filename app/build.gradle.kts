@@ -94,6 +94,12 @@ android {
         compose = true
         buildConfig = true
     }
+    // Room in-memory 单测跑在 Robolectric（JVM）上，需要资源与 instrumentation 环境
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 // Room schema 导出：app/schemas/ 入 git（迁移审查用，Metis V4.4）
@@ -138,6 +144,8 @@ dependencies {
     testImplementation(libs.junit)
     // Room in-memory 单测需要 ApplicationProvider（androidx.test:core）
     testImplementation(libs.androidx.test.core)
+    // ApplicationProvider 需要 instrumentation 环境：JVM 单测用 Robolectric 提供
+    testImplementation(libs.robolectric)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

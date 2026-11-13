@@ -106,7 +106,8 @@ class VolcDoubaoFileConnector(
     private val config: VolcConfig,
     private val uploader: SftpUploader,
     private val client: OkHttpClient = defaultClient(),
-    private val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true },
+    // explicitNulls=false：audio.language=null 时不发送 "language":null（对齐 PC 省略 None 字段）
+    private val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false },
     private val delayFn: suspend (Long) -> Unit = { delay(it) },
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {

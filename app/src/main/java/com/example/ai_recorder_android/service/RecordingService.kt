@@ -8,10 +8,23 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationManagerCompat
 import com.example.ai_recorder_android.App
+import com.example.ai_recorder_android.BuildConfig
+import com.example.ai_recorder_android.cloud.asr.DashScopeRealtimeConnector
+import com.example.ai_recorder_android.service.transcription.DashScopeRealtimeAdapter
+import com.example.ai_recorder_android.data.db.AppDatabase
+import com.example.ai_recorder_android.data.repo.UserConfigRepository
+import com.example.ai_recorder_android.data.storage.StorageService
+import com.example.ai_recorder_android.service.transcription.DefaultFileTranscriberFactory
+import com.example.ai_recorder_android.service.transcription.RealtimeListeners
+import com.example.ai_recorder_android.service.transcription.RealtimeTranscriptionPipeline
+import com.example.ai_recorder_android.service.transcription.RoomTranscriptionStore
+import com.example.ai_recorder_android.service.transcription.TranscriptionPipeline
 import java.io.File
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 
 /**
  * 前台录音服务：委托应用级共享 [RecordingCoordinator]（[App.recordingCoordinator]）编排录音，
@@ -93,6 +106,9 @@ class RecordingService : Service() {
     /** 服务协程作用域：命令委托 coordinator 的 suspend 方法（随服务销毁取消）。 */
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /** 活动的实时转写管线（tier=realtime 时创建；停止后清空）。 */
+    private var realtimePipeline: RealtimeTranscriptionPipeline? = null
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /** 每秒刷新通知中的已录音时长。 */
@@ -138,10 +154,11 @@ class RecordingService : Service() {
         startForegroundInternal(-1L)
         serviceScope.launch {
             try {
-                coordinator.startRecording(outputDir = dir)
-                currentRecordingId = coordinator.currentRecordingId ?: -1L
+                val rec = coordinator.startRecording(outputDir = dir)
+                currentRecordingId = rec.id
                 isRecording = true
                 mainHandler.post(ticker)
+                tryStartRealtimeTranscription(rec.id)
             } catch (e: Exception) {
                 Log.e(TAG, "启动录音失败: outputDir=$dir", e)
                 isRecording = false
@@ -153,6 +170,81 @@ class RecordingService : Service() {
                 stopSelf()
             }
         }
+    }
+
+    /**
+     * realtime 档：启动 DashScope Paraformer 流式转写并挂接 PCM 帧投递。
+     * 启动失败（key 缺失/连接失败）仅记日志，停止后回退文件转写。
+     */
+    private suspend fun tryStartRealtimeTranscription(recordingId: Long) {
+        val config = UserConfigRepository.fromContext(this).userConfig.first()
+        if (config.asrTier != "realtime") return
+        val db = AppDatabase.getInstance(this)
+        val pipeline = RealtimeTranscriptionPipeline(
+            connectorFactory = { cb ->
+                DashScopeRealtimeAdapter(
+                    DashScopeRealtimeConnector(apiKey = BuildConfig.DASHSCOPE_API_KEY, callback = cb),
+                )
+            },
+            store = RoomTranscriptionStore(db.recordingDao(), db.segmentDao()),
+        )
+        try {
+            pipeline.start(
+                recordingId,
+                RealtimeListeners(
+                    onPartial = { text -> mainHandler.post { coordinator.transcriptListener?.invoke(true, text) } },
+                    onSentence = { text, _, _ -> mainHandler.post { coordinator.transcriptListener?.invoke(false, text) } },
+                    onError = { e -> Log.w(TAG, "实时转写错误（停止后将回退文件转写）", e) },
+                ),
+            )
+            realtimePipeline = pipeline
+            coordinator.pcmListener = pipeline::feedPcm16k
+            Log.i(TAG, "实时转写已启动 recordingId=$recordingId")
+        } catch (e: Exception) {
+            Log.w(TAG, "实时转写启动失败，停止后回退文件转写", e)
+        }
+    }
+
+    /** 通知转为「转写中」。 */
+    private fun showTranscribingNotification(recordingId: Long) {
+        if (!isForeground) return
+        val notification = RecordingNotification.buildTranscribingNotification(this, recordingId)
+        NotificationManagerCompat.from(this).notify(RecordingNotification.NOTIFICATION_ID, notification)
+    }
+
+    /**
+     * 停止后文件转写（free/pro_lite/pro_pro 档，或 realtime 失败回退）：
+     * 整段 WAV → [TranscriptionPipeline]（按 tier+VAD 分发）→ 转写文本/chunks 落库。
+     */
+    private suspend fun transcribeFile(recordingId: Long) {
+        showTranscribingNotification(recordingId)
+        try {
+            val db = AppDatabase.getInstance(this)
+            val rec = db.recordingDao().getRecordingById(recordingId) ?: return
+            val wav = StorageService.fromContext(this).resolvePath(rec.audioPath)
+            val config = UserConfigRepository.fromContext(this).userConfig.first()
+            TranscriptionPipeline(
+                store = RoomTranscriptionStore(db.recordingDao(), db.segmentDao()),
+                transcriberFactory = DefaultFileTranscriberFactory(),
+            ).transcribe(
+                recordingId = recordingId,
+                wavFile = wav,
+                tier = config.asrTier,
+                vadEnabled = config.vadEnabled,
+                language = config.language.ifBlank { null },
+            )
+            toast("转写完成")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 管线内部已标记 FAILED，这里仅提示用户
+            Log.e(TAG, "停止后转写失败 recordingId=$recordingId", e)
+            toast("转写失败：${e.message?.take(80)}")
+        }
+    }
+
+    private fun toast(message: String) {
+        Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
     }
 
     private fun startForegroundInternal(recordingId: Long) {
@@ -178,23 +270,69 @@ class RecordingService : Service() {
 
     private fun handleStop() {
         serviceScope.launch {
+            val recordingId = coordinator.currentRecordingId
             try {
                 coordinator.stop()
             } catch (e: IllegalStateException) {
                 Log.w(TAG, "停止时无活动录音", e)
+                tearDownRealtime()
+                stopServiceForeground()
+                return@launch
             } catch (e: Exception) {
                 // 保存失败也不得卡死前台服务（P0）：通知常驻会导致无法再次启动录音
                 Log.e(TAG, "停止录音失败（保存可能不完整），仍移除前台通知并停止服务", e)
-            } finally {
-                // 不变量：无论 stop 成败，前台退出 + 状态复位必须执行
-                mainHandler.removeCallbacks(ticker)
-                isRecording = false
-                isForeground = false
-                currentRecordingId = -1L
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                tearDownRealtime()
+                stopServiceForeground()
+                return@launch
+            }
+
+            // 录音已落库，继续转写（服务保活，通知显示「转写中」）：
+            // - realtime 档：流式管线 finish → 最终句落库；SDK 报错/无句则回退文件转写
+            // - 其余档：整段 WAV 文件转写（按 tier+VAD 分发）
+            val rt = realtimePipeline
+            var transcribed = false
+            if (rt != null) {
+                realtimePipeline = null
+                coordinator.pcmListener = null
+                try {
+                    val result = rt.stop()
+                    transcribed = !result.aborted && (result.text.isNotBlank() || result.sentenceCount > 0)
+                    if (transcribed) toast("转写完成")
+                } catch (e: Exception) {
+                    Log.e(TAG, "实时转写收尾失败，回退文件转写", e)
+                }
+            }
+            if (!transcribed && recordingId != null && recordingId > 0) {
+                transcribeFile(recordingId)
+            }
+            stopServiceForeground()
+        }
+    }
+
+    /** 摘除实时转写管线与 PCM 投递（停止失败路径兜底）。 */
+    private fun tearDownRealtime() {
+        val rt = realtimePipeline
+        realtimePipeline = null
+        coordinator.pcmListener = null
+        if (rt != null) {
+            serviceScope.launch {
+                try {
+                    rt.stop()
+                } catch (e: Exception) {
+                    Log.w(TAG, "实时转写收尾失败（停止异常路径）", e)
+                }
             }
         }
+    }
+
+    private fun stopServiceForeground() {
+        // 不变量：无论 stop 成败，前台退出 + 状态复位必须执行
+        mainHandler.removeCallbacks(ticker)
+        isRecording = false
+        isForeground = false
+        currentRecordingId = -1L
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun updateNotification(elapsedMs: Long) {

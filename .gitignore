@@ -19,6 +19,7 @@ local.properties
 
 # Local secrets (never commit real API keys)
 secrets.properties
+.env
 
 # Release signing (never commit any keystore, path configured in keystore.properties)
 *.keystore

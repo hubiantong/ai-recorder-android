@@ -9,10 +9,13 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
  * AttachmentDao 单测（in-memory Room）：insert/update/getByRecordingId/deleteById/updateFusedChunkId。
  */
+@RunWith(RobolectricTestRunner::class)
 class AttachmentDaoTest {
 
     private lateinit var db: AppDatabase
@@ -72,9 +75,18 @@ class AttachmentDaoTest {
         assertEquals("一张会议白板照片", updated.description)
         assertEquals(DescriptionStatus.COMPLETED, updated.descriptionStatus)
 
-        // updateFusedChunkId：置值再置 null
-        dao.updateFusedChunkId(a2, 42L)
-        assertEquals(42L, dao.getByRecordingId(rid).first { it.id == a2 }.fusedChunkId)
+        // updateFusedChunkId：置值（fused_chunk_id 外键 → transcript_chunks.id，须为真实 chunk）
+        // 再置 null 解除关联
+        val chunkId = db.recordingDao().insertChunk(
+            TranscriptChunkEntity(
+                recordingId = rid,
+                chunkIndex = 0,
+                content = "被关联的 chunk",
+                createdAt = 1_752_000_000_000L,
+            ),
+        )
+        dao.updateFusedChunkId(a2, chunkId)
+        assertEquals(chunkId, dao.getByRecordingId(rid).first { it.id == a2 }.fusedChunkId)
         dao.updateFusedChunkId(a2, null)
         assertNull(dao.getByRecordingId(rid).first { it.id == a2 }.fusedChunkId)
 

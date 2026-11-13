@@ -21,6 +21,8 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
  * RecordingRepository 单测（in-memory Room + 临时目录 StorageService）：
@@ -28,6 +30,7 @@ import org.junit.rules.TemporaryFolder
  * addAttachment 落盘+插行、finalizeSegmented 合并段文件+清理、
  * delete 级联删行+删文件、缺失录音的 no-op / fail-fast。
  */
+@RunWith(RobolectricTestRunner::class)
 class RecordingRepositoryTest {
 
     @get:Rule
@@ -260,7 +263,8 @@ class RecordingRepositoryTest {
 
     /** 用 WavFileWriter 构造合法 WAV 字节（44 字节头 + PCM，大小字段回填）。 */
     private fun wavBytes(pcm: ByteArray): ByteArray {
-        val file = tmp.newFile("seg.wav")
+        // TemporaryFolder.newFile 不允许同名覆盖，用唯一名（单测内会写多个段文件）
+        val file = tmp.newFile("seg_${System.nanoTime()}.wav")
         RandomAccessFile(file, "rw").use { raf ->
             WavFileWriter.writeHeader(raf, WavFileWriter.DEFAULT_SAMPLE_RATE, WavFileWriter.DEFAULT_CHANNELS, WavFileWriter.DEFAULT_BITS_PER_SAMPLE)
             raf.write(pcm)

@@ -119,7 +119,7 @@ class PhotoAttachmentManagerTest {
     }
 
     @Test
-    fun savePhoto_whenPhotoFileMissing_throws() {
+    fun savePhoto_whenPhotoFileMissing_throws() = runBlocking {
         coordinator.startRecording(tmp.newFolder())
 
         val ex = assertThrows(PhotoAttachmentException::class.java) {

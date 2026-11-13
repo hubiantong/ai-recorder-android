@@ -57,6 +57,9 @@ interface RecordingEngineEvents {
 
     /** 读循环异常（如 AudioRecord 读失败）；引擎已尽力关闭段文件。 */
     fun onError(error: Throwable)
+
+    /** 录音中 16kHz/16-bit/mono PCM 帧（100ms 一帧，引擎线程）；暂停不回调。默认空实现。 */
+    fun onPcmFrame(pcm: ByteArray) {}
 }
 
 /**
@@ -79,6 +82,8 @@ class AudioRecorderEngineAdapter(
                 events.onSegmentClosed(index, file, durationMs)
 
             override fun onError(error: Throwable) = events.onError(error)
+
+            override fun onPcmFrame(pcm: ByteArray) = events.onPcmFrame(pcm)
         },
     )
 

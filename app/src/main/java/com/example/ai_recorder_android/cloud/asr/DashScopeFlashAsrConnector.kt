@@ -202,7 +202,8 @@ class DashScopeFlashAsrConnector(
 
         private const val CHUNK_SIZE = 64 * 1024
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-        private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+        // encodeDefaults=true：format/sample_rate 需随请求发送（对齐 PC dashscope_funasr.py）
+        private val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true }
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
