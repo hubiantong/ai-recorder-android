@@ -3,6 +3,7 @@ package com.example.ai_recorder_android.service
 import com.example.ai_recorder_android.core.audio.RecordingAudioEngine
 import com.example.ai_recorder_android.core.audio.RecordingAudioEngineFactory
 import com.example.ai_recorder_android.core.audio.RecordingEngineEvents
+import com.example.ai_recorder_android.core.audio.RecordingSessionConfig
 import com.example.ai_recorder_android.data.db.AttachmentDao
 import com.example.ai_recorder_android.data.db.AttachmentSource
 import com.example.ai_recorder_android.data.db.AttachmentType
@@ -67,7 +68,7 @@ class PhotoAttachmentManagerTest {
 
     @Test
     fun savePhoto_copiesPhotoCreatesAttachmentAndThumbnail() = runBlocking {
-        coordinator.startRecording(tmp.newFolder(), "测试", AudioSource.MIC, false)
+        coordinator.startRecording(tmp.newFolder(), "测试")
         val photo = tmp.newFile("photo.jpg").apply { writeBytes(PHOTO_BYTES) }
 
         val entity = manager.savePhoto(photo, wallClockMs = System.currentTimeMillis())
@@ -302,7 +303,12 @@ class PhotoAttachmentManagerTest {
     }
 
     private class FakeEngineFactory : RecordingAudioEngineFactory {
-        override fun create(recordingId: Long, outputDir: File, events: RecordingEngineEvents): RecordingAudioEngine =
+        override fun create(
+            recordingId: Long,
+            outputDir: File,
+            events: RecordingEngineEvents,
+            config: RecordingSessionConfig,
+        ): RecordingAudioEngine =
             FakeEngine()
     }
 

@@ -3,6 +3,7 @@ package com.example.ai_recorder_android.service
 import com.example.ai_recorder_android.core.audio.RecordingAudioEngine
 import com.example.ai_recorder_android.core.audio.RecordingAudioEngineFactory
 import com.example.ai_recorder_android.core.audio.RecordingEngineEvents
+import com.example.ai_recorder_android.core.audio.RecordingSessionConfig
 import com.example.ai_recorder_android.core.audio.WavFileWriter
 import com.example.ai_recorder_android.data.db.AttachmentSource
 import com.example.ai_recorder_android.data.db.AttachmentType
@@ -197,8 +198,9 @@ class RecordingCoordinator(
     /**
      * 开始录音（对齐 PC `create_recording` + `start_recording`）：
      * 1. 置 [RecordingPhase.STARTING]（UI 立即进入过渡态）；
-     * 2. 创建 PENDING 行 → 状态落库 PROCESSING；
-     * 3. 经 [RecordingAudioEngineFactory] 创建引擎并 start（输出段文件到 [outputDir]）；
+     * 2. 创建 PENDING 行 → 状态落库 PROCESSING（音源/会议模式按 [config] 落库）；
+     * 3. 经 [RecordingAudioEngineFactory] 创建引擎并 start（按 [config.audioSource] 选择
+     *    麦克风/系统音频采集器，输出段文件到 [outputDir]）；
      * 4. 成功后置 [RecordingPhase.RECORDING]；任一步失败回滚 DB 行、置 [RecordingPhase.ERROR] 并重抛。
      *
      * @throws IllegalStateException 已在录音中/启动中
@@ -206,8 +208,7 @@ class RecordingCoordinator(
     suspend fun startRecording(
         outputDir: File,
         title: String? = null,
-        audioSource: AudioSource? = null,
-        meetingMode: Boolean = false,
+        config: RecordingSessionConfig = RecordingSessionConfig.DEFAULT,
     ): RecordingEntity = mutex.withLock {
         check(phase == RecordingPhase.IDLE || phase == RecordingPhase.COMPLETED || phase == RecordingPhase.ERROR) {
             "已在录音中（phase=$phase）"
@@ -216,12 +217,12 @@ class RecordingCoordinator(
 
         var createdId: Long? = null
         try {
-            val rec = repository.create(title, audioSource, meetingMode)
+            val rec = repository.create(title, AudioSource.fromValue(config.audioSource), config.meetingMode)
             createdId = rec.id
             repository.start(rec.id)
             publish(RecordingPhase.STARTING, rec.id)
 
-            val engine = engineFactory.create(rec.id, outputDir, this)
+            val engine = engineFactory.create(rec.id, outputDir, this, config)
             withContext(ioDispatcher) { engine.start() }
 
             synchronized(segmentLock) {

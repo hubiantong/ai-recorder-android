@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
+import kotlinx.coroutines.flow.Flow
 import java.time.Instant
 import java.time.ZoneId
 
@@ -179,6 +180,29 @@ interface RecordingDao {
     @Transaction
     @Query("SELECT * FROM recordings WHERE id = :id")
     suspend fun getRecordingWithRelations(id: Long): RecordingWithRelations?
+
+    // ---------- 实时观察（Flow）：AI 后处理状态变化实时回流 UI ----------
+
+    /** 全部录音（created_at 倒序）观察流：历史列表实时刷新（如「AI 处理中→已完成」）。 */
+    @Query("SELECT * FROM recordings ORDER BY created_at DESC")
+    fun observeAllRecordings(): Flow<List<RecordingEntity>>
+
+    /** 搜索观察流：语义与 [searchRecordings] 相同（title OR transcription LIKE）。 */
+    @Query(
+        """
+        SELECT * FROM recordings
+        WHERE trim(:query) = ''
+           OR title LIKE '%' || :query || '%'
+           OR transcription LIKE '%' || :query || '%'
+        ORDER BY created_at DESC
+        """,
+    )
+    fun observeSearchRecordings(query: String): Flow<List<RecordingEntity>>
+
+    /** 录音 + 子表（chunks/segments/attachments）观察流：详情页实时刷新。 */
+    @Transaction
+    @Query("SELECT * FROM recordings WHERE id = :id")
+    fun observeRecordingWithRelations(id: Long): Flow<RecordingWithRelations?>
 
     // ---------- 后处理恢复 ----------
 

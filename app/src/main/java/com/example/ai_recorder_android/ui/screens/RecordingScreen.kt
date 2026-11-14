@@ -1,10 +1,15 @@
 package com.example.ai_recorder_android.ui.screens
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,11 +23,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -41,7 +49,12 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.ai_recorder_android.App
 import com.example.ai_recorder_android.R
+import com.example.ai_recorder_android.core.audio.RecordingSessionConfig
+import com.example.ai_recorder_android.data.repo.UserConfig
 import com.example.ai_recorder_android.data.repo.UserConfigRepository
+import com.example.ai_recorder_android.ui.components.BrandVolumeBar
+import com.example.ai_recorder_android.ui.components.PulsingDot
+import com.example.ai_recorder_android.ui.theme.RecordingRed
 import com.example.ai_recorder_android.service.RecordingCoordinator
 import com.example.ai_recorder_android.service.RecordingPhase
 import com.example.ai_recorder_android.service.RecordingService
@@ -54,6 +67,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /** 实时转写气泡条目（id 供 LazyColumn key 使用）。 */
@@ -89,6 +103,10 @@ class RecordingViewModel(
     private val _partials = MutableStateFlow<List<PartialTranscript>>(emptyList())
     val partials: StateFlow<List<PartialTranscript>> = _partials.asStateFlow()
 
+    /** 当前用户配置（DataStore）；未加载完成前为 null。 */
+    private val _userConfig = MutableStateFlow<UserConfig?>(null)
+    val userConfig: StateFlow<UserConfig?> = _userConfig.asStateFlow()
+
     /** 当前 ASR 档位（free/realtime/pro_lite/pro_pro），来自 UserConfig（DataStore）。 */
     private val _tier = MutableStateFlow("free")
     val tier: StateFlow<String> = _tier.asStateFlow()
@@ -106,20 +124,47 @@ class RecordingViewModel(
             if (partial) onPartialTranscript(text) else onSentenceTranscript(text)
         }
         scope.launch {
-            userConfigRepository.userConfig.collect { config -> _tier.value = config.asrTier }
+            userConfigRepository.userConfig.collect { config ->
+                _userConfig.value = config
+                _tier.value = config.asrTier
+            }
         }
     }
 
     // ---------- 录音控制（只发命令；状态由 Coordinator 回推） ----------
 
-    /** 开始录音：仅在 Coordinator 处于空闲/已完成/失败态时发送命令，不做乐观更新。 */
-    fun onStartClick() {
-        val phase = sessionState.value.phase
-        if (phase != RecordingPhase.IDLE && phase != RecordingPhase.COMPLETED && phase != RecordingPhase.ERROR) return
-        _partials.value = emptyList()
-        _rmsLevel.value = 0f
-        val outputDir = File(context.filesDir, "recordings").apply { mkdirs() }
-        context.startForegroundService(RecordingService.startIntent(context, outputDir))
+    /**
+     * 开始录音：仅在 Coordinator 处于空闲/已完成/失败态时发送命令，不做乐观更新。
+     *
+     * 会话配置从 UserConfig 组装（[RecordingSessionConfig]）：
+     * - 会议模式开启时按「默认音源」选择采集器（system/mixed 需 [resultCode]/[resultData]
+     *   的 MediaProjection 授权结果，由 UI 授权弹窗提供）；
+     * - 会议模式关闭时始终为麦克风录音（音源设置属于会议模式分组，不外溢到普通录音）。
+     *
+     * @param resultCode 系统音频授权结果码（普通麦克风录音忽略）
+     * @param resultData 系统音频授权 Intent（普通麦克风录音忽略）
+     */
+    fun onStartClick(resultCode: Int = 0, resultData: Intent? = null) {
+        scope.launch {
+            val phase = sessionState.value.phase
+            if (phase != RecordingPhase.IDLE && phase != RecordingPhase.COMPLETED && phase != RecordingPhase.ERROR) return@launch
+            val config = userConfigRepository.userConfig.first()
+            _partials.value = emptyList()
+            _rmsLevel.value = 0f
+            val outputDir = File(context.filesDir, "recordings").apply { mkdirs() }
+            val audioSource = if (config.meetingMode) {
+                RecordingSessionConfig.sanitizeSource(config.meetingAudioSource)
+            } else {
+                RecordingSessionConfig.SOURCE_MIC
+            }
+            val sessionConfig = RecordingSessionConfig(
+                meetingMode = config.meetingMode,
+                audioSource = audioSource,
+                projectionResultCode = resultCode,
+                projectionResultData = resultData,
+            )
+            context.startForegroundService(RecordingService.startIntent(context, outputDir, sessionConfig))
+        }
     }
 
     /** 暂停：仅在 Coordinator 真实处于 RECORDING 时发送。 */
@@ -194,16 +239,16 @@ class RecordingViewModel(
 }
 
 /**
- * 录音主页（todo 19）：音量指示条 + 录音控制 + 实时转写气泡 + 拍照入口 + 档位/设置入口。
+ * 录音主页：音量指示条 + 录音控制 + 实时转写气泡 + 拍照/文件转写入口 + 档位/设置入口。
  *
- * @param onPhotoClick 拍照入口附加回调（todo 23 相机流程已内建，此参数保留供导航等扩展）
+ * @param onFileUploadClick 文件转写入口（跳转 Routes.FILE_UPLOAD）
  * @param onSettingsClick 设置入口（跳转 Routes.SETTINGS）
  */
 @Composable
 fun RecordingScreen(
     viewModel: RecordingViewModel = viewModel(factory = RecordingViewModel.factory(LocalContext.current)),
-    onPhotoClick: () -> Unit = {},
-    onSettingsClick: () -> Unit = {},
+    onFileUploadClick: () -> Unit,
+    onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val session by viewModel.sessionState.collectAsState()
@@ -213,6 +258,7 @@ fun RecordingScreen(
 
     // 录音权限请求：已授权时系统直接回调 granted，无需手动预检
     val context = LocalContext.current
+    val userConfig by viewModel.userConfig.collectAsState()
 
     // 启动/停止失败（Coordinator 真实状态回推）→ 用户可见提示；失败态可直接重试
     LaunchedEffect(session.errorMessage) {
@@ -220,17 +266,42 @@ fun RecordingScreen(
             Toast.makeText(context, message, Toast.LENGTH_LONG).show()
         }
     }
+
+    // 系统音频授权（会议模式 system/mixed 音源）：授权结果透传给服务，
+    // 服务先以含 MEDIA_PROJECTION 的前台类型启动，再由引擎 getMediaProjection
+    val projectionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            viewModel.onStartClick(result.resultCode, result.data)
+        } else {
+            Toast.makeText(context, "需要屏幕录制权限才能采集系统音频", Toast.LENGTH_LONG).show()
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) {
-            viewModel.onStartClick()
-        } else {
+        if (!granted) {
             Toast.makeText(
                 context,
                 "录音需要麦克风权限，若已拒绝请在系统设置中开启后重试",
                 Toast.LENGTH_LONG,
             ).show()
+            return@rememberLauncherForActivityResult
+        }
+        // 会议模式 + system/mixed 音源：先弹 MediaProjection 授权，再开始录音
+        val config = userConfig ?: UserConfig()
+        val source = if (config.meetingMode) {
+            RecordingSessionConfig.sanitizeSource(config.meetingAudioSource)
+        } else {
+            RecordingSessionConfig.SOURCE_MIC
+        }
+        if (source != RecordingSessionConfig.SOURCE_MIC) {
+            val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                as MediaProjectionManager
+            projectionLauncher.launch(manager.createScreenCaptureIntent())
+        } else {
+            viewModel.onStartClick()
         }
     }
 
@@ -284,16 +355,25 @@ fun RecordingScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 拍照入口（todo 23 相机流程；仅录音中可用——对齐 Coordinator.addAttachment 需活动会话）
-        FilledTonalButton(
-            onClick = {
-                onPhotoClick()
-                photoController.launch()
-            },
-            enabled = session.isActive,
+        // 拍照（相机流程内建，仅录音中可用——对齐 Coordinator.addAttachment 需活动会话）
+        // 与文件转写（恒可用）并列的快捷入口行
+        Row(
             modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("拍照")
+            FilledTonalButton(
+                onClick = { photoController.launch() },
+                enabled = session.isActive,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("拍照")
+            }
+            FilledTonalButton(
+                onClick = onFileUploadClick,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("文件转写")
+            }
         }
         PhotoCaptureResult(controller = photoController, manager = photoManager)
     }
@@ -316,7 +396,7 @@ private fun TierChip(tier: String, onClick: () -> Unit) {
     }
 }
 
-/** 音量指示条：LinearProgressIndicator 由 RMS 电平（0.0-1.0）驱动。 */
+/** 音量指示条：品牌渐变电平条（RMS 0.0-1.0 驱动，平滑过渡）。 */
 @Composable
 private fun VolumeIndicator(rmsLevel: Float) {
     Column {
@@ -326,16 +406,11 @@ private fun VolumeIndicator(rmsLevel: Float) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(modifier = Modifier.height(4.dp))
-        LinearProgressIndicator(
-            progress = { rmsLevel },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(8.dp),
-        )
+        BrandVolumeBar(level = rmsLevel, modifier = Modifier.fillMaxWidth())
     }
 }
 
-/** 实时转写气泡列表：圆角卡片样式；空态显示提示文案。 */
+/** 实时转写气泡列表：品牌圆角卡片 + 进出场动画；空态显示提示文案。 */
 @Composable
 private fun PartialTranscriptList(
     partials: List<PartialTranscript>,
@@ -360,8 +435,12 @@ private fun PartialTranscriptList(
     ) {
         items(partials, key = { it.id }) { partial ->
             Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = MaterialTheme.shapes.large,
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                modifier = Modifier.animateItem(
+                    fadeInSpec = tween(180),
+                    fadeOutSpec = tween(180),
+                ),
             ) {
                 Text(
                     text = partial.text,
@@ -376,8 +455,9 @@ private fun PartialTranscriptList(
 /**
  * 录音控制按钮组：按 Coordinator 真实阶段启停。
  *
+ * 按钮层级（品牌规范）：开始录音=主色实心、停止=错误容器色、暂停/继续=描边次级。
  * STARTING/STOPPING 过渡期全部禁用（避免快速连点产生乱序命令）；
- * IDLE/COMPLETED/ERROR 可开始（失败可直接重试）。
+ * IDLE/COMPLETED/ERROR 可开始（失败可直接重试）；录音中显示脉冲红点指示。
  */
 @Composable
 private fun RecordingControls(
@@ -392,8 +472,25 @@ private fun RecordingControls(
     val canPause = session.phase == RecordingPhase.RECORDING
     val canResume = session.phase == RecordingPhase.PAUSED
 
+    AnimatedVisibility(visible = session.phase == RecordingPhase.RECORDING) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            PulsingDot()
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "录音中",
+                style = MaterialTheme.typography.labelMedium,
+                color = RecordingRed,
+            )
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+
     Row(modifier = Modifier.fillMaxWidth()) {
-        FilledTonalButton(
+        Button(
             onClick = onStartClick,
             enabled = canStart,
             modifier = Modifier.weight(1f),
@@ -401,17 +498,21 @@ private fun RecordingControls(
             Text("开始录音")
         }
         Spacer(modifier = Modifier.width(8.dp))
-        FilledTonalButton(
+        Button(
             onClick = onStopClick,
             enabled = canStop,
             modifier = Modifier.weight(1f),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            ),
         ) {
             Text("停止")
         }
     }
     Spacer(modifier = Modifier.height(8.dp))
     Row(modifier = Modifier.fillMaxWidth()) {
-        FilledTonalButton(
+        OutlinedButton(
             onClick = onPauseClick,
             enabled = canPause,
             modifier = Modifier.weight(1f),
@@ -419,7 +520,7 @@ private fun RecordingControls(
             Text("暂停")
         }
         Spacer(modifier = Modifier.width(8.dp))
-        FilledTonalButton(
+        OutlinedButton(
             onClick = onResumeClick,
             enabled = canResume,
             modifier = Modifier.weight(1f),

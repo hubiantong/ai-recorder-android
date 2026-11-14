@@ -25,12 +25,14 @@ import androidx.compose.ui.unit.dp
  * 首启引导页：首次启动选择转写档位（凭证内置，无运行期密钥输入，Metis B1.3），
  * 下方只读展示固定配置（VLM/LLM 硬编码，对齐 PC settings_dialog 的只读区）。
  *
- * 点击"开始使用"→ 落库 tier + onboarding_done=true；已完成的用户再次进入
- * 仅展示只读配置（onboarding_done 检查在屏幕内部完成，导航接线在 MainActivity，
- * 本任务禁止修改）。
+ * 点击"开始使用"→ 落库 tier + onboarding_done=true → [onComplete]（导航到主页）；
+ * 已完成的用户再次进入仅展示只读配置 + "完成"按钮（保证可退出）。
+ * onboarding_done 的启动门控在 MainActivity（首启 startDestination 指向本页）。
+ *
+ * @param onComplete 引导完成（新完成/再次进入确认）后的出口：MainActivity 导航到 HOME
  */
 @Composable
-fun OnboardingScreen(modifier: Modifier = Modifier) {
+fun OnboardingScreen(onComplete: () -> Unit, modifier: Modifier = Modifier) {
     val viewModel = rememberSettingsViewModel()
     val config by viewModel.config.collectAsState()
 
@@ -65,6 +67,7 @@ fun OnboardingScreen(modifier: Modifier = Modifier) {
                     // 确保所选 tier 已持久化，再标记引导完成
                     viewModel.setAsrTier(config.asrTier)
                     viewModel.setOnboardingDone(true)
+                    onComplete()
                 },
                 modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
             ) {
@@ -77,6 +80,12 @@ fun OnboardingScreen(modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(bottom = 16.dp),
             )
+            Button(
+                onClick = onComplete,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("完成")
+            }
         }
 
         Spacer(modifier = Modifier.height(24.dp))

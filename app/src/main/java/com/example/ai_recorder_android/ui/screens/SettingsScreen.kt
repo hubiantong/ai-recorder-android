@@ -97,6 +97,13 @@ internal val SCREENSHOT_MODE_OPTIONS = listOf(
     "region" to "框选截屏（拖拽选择区域）",
 )
 
+/** 主题模式选项（system = 跟随系统）。 */
+internal val THEME_OPTIONS = listOf(
+    "system" to "跟随系统",
+    "light" to "浅色",
+    "dark" to "深色",
+)
+
 internal fun tierLabel(id: String): String =
     TIER_OPTIONS.firstOrNull { it.id == id }?.label ?: TIER_OPTIONS.first().label
 
@@ -108,6 +115,9 @@ internal fun audioSourceLabel(value: String): String =
 
 internal fun screenshotModeLabel(value: String): String =
     SCREENSHOT_MODE_OPTIONS.firstOrNull { it.first == value }?.second ?: SCREENSHOT_MODE_OPTIONS.first().second
+
+internal fun themeLabel(value: String): String =
+    THEME_OPTIONS.firstOrNull { it.first == value }?.second ?: THEME_OPTIONS.first().second
 
 // ---------- ViewModel ----------
 
@@ -164,6 +174,16 @@ class SettingsViewModel(private val repository: UserConfigRepository) : ViewMode
     /** 系统音频 VAD 阈值，钳制 0.001-0.1（对齐 PC spin 范围）。 */
     fun setMeetingVadThreshold(threshold: Double) {
         scope.launch { repository.setMeetingVadSilenceThreshold(threshold.coerceIn(0.001, 0.1)) }
+    }
+
+    /** 主题模式：system（跟随系统）/ light / dark。 */
+    fun setTheme(theme: String) {
+        scope.launch { repository.setTheme(theme) }
+    }
+
+    /** Android 12+ 动态配色（壁纸取色）；默认关闭保持品牌色。 */
+    fun setDynamicColor(enabled: Boolean) {
+        scope.launch { repository.setDynamicColor(enabled) }
     }
 
     fun setOnboardingDone(done: Boolean) {
@@ -324,6 +344,26 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         )
         Text(
             text = "会议模式用于视频会议场景：录制系统音频（对方发言）+ 麦克风（本地发言），支持截屏作为附件。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+
+        // ---- 外观 ----
+        SettingsSectionHeader("外观")
+        ConfigDropdown(
+            label = "主题模式",
+            selectedLabel = themeLabel(config.theme),
+            options = THEME_OPTIONS,
+            onSelect = viewModel::setTheme,
+        )
+        SwitchRow(
+            label = "动态配色（Android 12+ 壁纸取色，覆盖品牌色）",
+            checked = config.dynamicColor,
+            onCheckedChange = viewModel::setDynamicColor,
+        )
+        Text(
+            text = "关闭时使用应用固定的深色科技风品牌配色；开启后颜色随系统壁纸变化。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 4.dp, bottom = 24.dp),

@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import com.example.ai_recorder_android.core.audio.AudioRecorderEngineAdapter
 import com.example.ai_recorder_android.core.audio.RecordingAudioEngineFactory
+import com.example.ai_recorder_android.core.audio.SystemAudioEngineAdapter
 import com.example.ai_recorder_android.data.db.AppDatabase
 import com.example.ai_recorder_android.data.repo.RecordingRepository
 import com.example.ai_recorder_android.data.storage.StorageService
@@ -48,8 +49,13 @@ class App : Application() {
         val storage = StorageService.fromContext(this)
         RecordingCoordinator(
             repository = RecordingRepository(db.recordingDao(), db.attachmentDao(), storage),
-            engineFactory = RecordingAudioEngineFactory { id, dir, events ->
-                AudioRecorderEngineAdapter(id, dir, events)
+            engineFactory = RecordingAudioEngineFactory { id, dir, events, config ->
+                // 音源决定采集器：mic 走成熟麦克风链路；system/mixed 走系统音频采集（需授权）
+                if (config.needsProjection) {
+                    SystemAudioEngineAdapter(this@App, id, dir, config, events)
+                } else {
+                    AudioRecorderEngineAdapter(id, dir, events)
+                }
             },
         )
     }

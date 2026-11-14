@@ -3,6 +3,7 @@ package com.example.ai_recorder_android.service
 import com.example.ai_recorder_android.core.audio.RecordingAudioEngine
 import com.example.ai_recorder_android.core.audio.RecordingAudioEngineFactory
 import com.example.ai_recorder_android.core.audio.RecordingEngineEvents
+import com.example.ai_recorder_android.core.audio.RecordingSessionConfig
 import com.example.ai_recorder_android.core.audio.WavFileWriter
 import com.example.ai_recorder_android.data.db.AttachmentSource
 import com.example.ai_recorder_android.data.db.AttachmentType
@@ -60,10 +61,16 @@ class RecordingCoordinatorTest {
 
     @Test
     fun startRecording_createsRowStartsEngineAndTransitionsToRecording() = runBlocking {
-        val rec = coordinator.startRecording(tmp.newFolder(), "测试录音", AudioSource.MIC, true)
+        val rec = coordinator.startRecording(
+            tmp.newFolder(),
+            "测试录音",
+            RecordingSessionConfig(meetingMode = true, audioSource = AudioSource.MIC.value),
+        )
 
         assertEquals("应创建 PENDING 行", 1, store.created.size)
         assertEquals(listOf(rec.id), store.started)
+        assertEquals("会话配置应透传引擎工厂", AudioSource.MIC.value, factory.lastConfig?.audioSource)
+        assertTrue(factory.lastConfig?.meetingMode == true)
         assertEquals(1, factory.engine.startCalls)
         assertEquals(RecordingPhase.RECORDING, coordinator.sessionState.value.phase)
         assertEquals(rec.id, coordinator.currentRecordingId)
@@ -131,7 +138,7 @@ class RecordingCoordinatorTest {
 
     @Test
     fun stop_singleSegment_persistsSegmentAndTriggersUnifiedMerge() = runBlocking {
-        val rec = coordinator.startRecording(tmp.newFolder(), "a", AudioSource.MIC, false)
+        val rec = coordinator.startRecording(tmp.newFolder(), "a")
         // 模拟引擎关闭段 0：1 秒音频（16kHz/16-bit/mono → 32000 字节 PCM + 44 头）
         val segmentFile = wavFile(32_000)
         factory.engine.simulateSegmentClosed(0, segmentFile)
@@ -457,9 +464,16 @@ class RecordingCoordinatorTest {
         val engine = FakeEngine()
         var failStart = false
         var lastEvents: RecordingEngineEvents? = null
+        var lastConfig: RecordingSessionConfig? = null
 
-        override fun create(recordingId: Long, outputDir: File, events: RecordingEngineEvents): RecordingAudioEngine {
+        override fun create(
+            recordingId: Long,
+            outputDir: File,
+            events: RecordingEngineEvents,
+            config: RecordingSessionConfig,
+        ): RecordingAudioEngine {
             lastEvents = events
+            lastConfig = config
             engine.failStart = failStart
             engine.attachEvents(events)
             return engine

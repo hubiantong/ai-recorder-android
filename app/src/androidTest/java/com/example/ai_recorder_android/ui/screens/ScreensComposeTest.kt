@@ -46,12 +46,16 @@ class ScreensComposeTest {
         val repo = RecordingRepository(db.recordingDao(), db.attachmentDao(), storage)
         val coordinator = RecordingCoordinator(
             repository = repo,
-            engineFactory = RecordingAudioEngineFactory { _, _, _ -> error("测试不应创建引擎") },
+            engineFactory = RecordingAudioEngineFactory { _, _, _, _ -> error("测试不应创建引擎") },
         )
         val vm = RecordingViewModel(context, coordinator, UserConfigRepository.fromContext(context))
 
         composeTestRule.setContent {
-            RecordingScreen(viewModel = vm)
+            RecordingScreen(
+                viewModel = vm,
+                onFileUploadClick = {},
+                onSettingsClick = {},
+            )
         }
 
         // 录音控制按钮
@@ -63,8 +67,9 @@ class ScreensComposeTest {
         composeTestRule.onNodeWithText("实时转写将显示在这里").assertIsDisplayed()
         // 档位胶囊（tier 来自 DataStore，用前缀匹配避免依赖持久化值）
         composeTestRule.onNodeWithText("档位 · ", substring = true).assertIsDisplayed()
-        // 拍照入口
+        // 拍照 + 文件转写快捷入口
         composeTestRule.onNodeWithText("拍照").assertIsDisplayed()
+        composeTestRule.onNodeWithText("文件转写").assertIsDisplayed()
     }
 
     // ---------- HistoryScreen ----------
@@ -72,8 +77,10 @@ class ScreensComposeTest {
     @Test
     fun historyScreen_rendersSearchBar() {
         composeTestRule.setContent {
-            val navController = rememberNavController()
-            HistoryScreen(navController = navController)
+            HistoryScreen(
+                onRecordingClick = {},
+                onFileUploadClick = {},
+            )
         }
 
         // 搜索栏占位文案（不依赖 DB 状态，确定性渲染）

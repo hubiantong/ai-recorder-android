@@ -95,6 +95,38 @@ object PostProcessingScheduler {
         }
     }
 
+    /**
+     * 重新生成标题与笔记（详情页「重新生成」入口）：跳过转写步骤，
+     * 直接串联 AutoTitleTaskWorker → NoteFusionTaskWorker。
+     *
+     * - 复用整条链的 unique 工作名（[uniqueWorkName]）+ [ExistingWorkPolicy.REPLACE]：
+     *   在途的旧链被取消替换，且 App 启动恢复扫描天然去重；
+     * - 转写缺失（transcription == null）时不投递（Worker 依赖转写结果），返回 false。
+     *
+     * @return 是否成功投递
+     */
+    suspend fun reenqueueNoteGeneration(context: Context, recordingId: Long): Boolean {
+        if (recordingId <= 0) return false
+        val appContext = context.applicationContext
+        val recording = AppDatabase.getInstance(appContext).recordingDao().getRecordingById(recordingId)
+        if (recording?.transcription == null) {
+            Log.w(TAG, "重新生成笔记：转写缺失，跳过 recordingId=$recordingId")
+            return false
+        }
+        val workManager = WorkManager.getInstance(appContext)
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+        val title = request<AutoTitleTaskWorker>(recordingId, constraints)
+        val note = request<NoteFusionTaskWorker>(recordingId, constraints)
+        workManager
+            .beginUniqueWork(uniqueWorkName(recordingId), ExistingWorkPolicy.REPLACE, title)
+            .then(note)
+            .enqueue()
+        Log.i(TAG, "已投递重新生成笔记链 recordingId=$recordingId")
+        return true
+    }
+
     private inline fun <reified W : ListenableWorker> request(
         recordingId: Long,
         constraints: Constraints,
@@ -165,6 +197,13 @@ class TranscriptionWorker(
             TranscriptionPipeline(
                 store = store,
                 transcriberFactory = DefaultFileTranscriberFactory(),
+                // 接通设置页 VAD 四滑杆（此前一直用默认值）
+                vadParams = VadParams(
+                    silenceThreshold = config.vadSilenceThreshold,
+                    silenceDuration = config.vadSilenceDuration,
+                    minSegment = config.vadMinSegment,
+                    maxSegment = config.vadMaxSegment,
+                ),
             ).transcribe(
                 recordingId = recordingId,
                 wavFile = wav,

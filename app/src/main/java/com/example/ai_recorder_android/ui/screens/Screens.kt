@@ -4,13 +4,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 
 /**
- * 录音主页（todo 19）：真实 RecordingScreen，含音量指示条/录音控制/实时转写/拍照入口。
- * 拍照入口（todo 23）已内建相机流程；设置导航待 todo 19 完成 MainActivity 接线。
+ * 录音主页：真实 RecordingScreen，含音量指示条/录音控制/实时转写/拍照与文件转写入口。
+ * 导航回调必传（无空默认值），由 MainActivity NavHost 接线。
  */
 @Composable
 fun HomeScreen(
-    onSettingsClick: () -> Unit = {},
+    onSettingsClick: () -> Unit,
+    onFileUploadClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    RecordingScreen(onSettingsClick = onSettingsClick, modifier = modifier)
+    RecordingScreen(
+        onSettingsClick = onSettingsClick,
+        onFileUploadClick = onFileUploadClick,
+        modifier = modifier,
+    )
 }

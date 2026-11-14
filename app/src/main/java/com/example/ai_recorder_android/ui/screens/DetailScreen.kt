@@ -1,5 +1,7 @@
 package com.example.ai_recorder_android.ui.screens
 
+import android.content.Context
+import android.content.Intent
 import android.media.MediaPlayer
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.foundation.Canvas
@@ -21,21 +23,27 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -54,8 +62,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -64,10 +74,10 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.navigation.NavBackStackEntry
 import coil3.compose.AsyncImage
 import com.example.ai_recorder_android.R
@@ -75,10 +85,17 @@ import com.example.ai_recorder_android.data.db.AppDatabase
 import com.example.ai_recorder_android.data.db.AttachmentType
 import com.example.ai_recorder_android.data.db.RecordingAttachmentEntity
 import com.example.ai_recorder_android.data.db.RecordingDao
+import com.example.ai_recorder_android.data.db.RecordingEntity
 import com.example.ai_recorder_android.data.db.RecordingStatus
 import com.example.ai_recorder_android.data.db.RecordingWithRelations
 import com.example.ai_recorder_android.data.db.TranscriptChunkEntity
 import com.example.ai_recorder_android.data.storage.StorageService
+import com.example.ai_recorder_android.service.transcription.PostProcessingScheduler
+import com.example.ai_recorder_android.ui.components.ProcessingIndicator
+import com.example.ai_recorder_android.ui.components.RecordingStatusChip
+import com.example.ai_recorder_android.ui.components.RecordingTypeChip
+import com.example.ai_recorder_android.ui.components.SectionCard
+import com.example.ai_recorder_android.ui.components.SectionTitle
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -92,15 +109,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 录音详情 ViewModel：注入 [RecordingDao]，加载 [RecordingWithRelations]。
+ * 录音详情 ViewModel：注入 [RecordingDao]，经 [RecordingDao.observeRecordingWithRelations]
+ * **实时观察**录音与子表（AI 后处理落库后详情自动刷新，如笔记生成完成）。
  *
  * [recordingId] 为 null（导航参数缺失/预览场景）时直接进入 error 空态，不查询数据库。
- * 音频文件存在性检查与图片附件过滤涉及磁盘 stat，随 DB 查询一并切 IO 线程完成。
+ * 音频文件存在性检查与图片附件过滤涉及磁盘 stat，切 IO 线程完成；
+ * audioPath 未变化时复用上一个 [File] 实例，避免播放器被误重建导致播放中断。
  */
 class DetailViewModel(
     private val recordingId: Long?,
     private val dao: RecordingDao,
     private val storage: StorageService,
+    private val appContext: Context,
 ) : ViewModel() {
 
     data class UiState(
@@ -120,22 +140,54 @@ class DetailViewModel(
                 _uiState.value = UiState(loading = false, error = "未选择录音")
                 return@launch
             }
-            val data = withContext(Dispatchers.IO) { dao.getRecordingWithRelations(recordingId) }
-            _uiState.value = if (data == null) {
-                UiState(loading = false, error = "录音不存在或已被删除")
-            } else {
-                withContext(Dispatchers.IO) {
-                    UiState(
-                        loading = false,
-                        recording = data,
-                        audioFile = resolveAudioFile(storage, data),
-                        imageAttachments = data.attachments.filter {
+            dao.observeRecordingWithRelations(recordingId).collect { data ->
+                if (data == null) {
+                    _uiState.value = UiState(loading = false, error = "录音不存在或已被删除")
+                    return@collect
+                }
+                val resolvedFile = withContext(Dispatchers.IO) { resolveAudioFile(storage, data) }
+                val prev = _uiState.value
+                _uiState.value = UiState(
+                    loading = false,
+                    recording = data,
+                    // 路径未变复用旧 File 实例：rememberMediaPlayer 按实例 keyed，避免误重建
+                    audioFile = if (prev.audioFile?.absolutePath == resolvedFile?.absolutePath) {
+                        prev.audioFile
+                    } else {
+                        resolvedFile
+                    },
+                    imageAttachments = withContext(Dispatchers.IO) {
+                        data.attachments.filter {
                             it.attachmentType == AttachmentType.IMAGE &&
                                 resolveOrNull(storage, it.storageLocator)?.isFile == true
-                        },
-                    )
+                        }
+                    },
+                )
+            }
+        }
+    }
+
+    /** 保存标题编辑（空白视为回退默认标题 → title = null）。 */
+    fun saveTitle(title: String) {
+        val id = recordingId ?: return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                dao.getRecordingById(id)?.let { current ->
+                    val trimmed = title.trim()
+                    dao.updateRecording(current.copy(title = trimmed.takeIf { it.isNotEmpty() }))
                 }
             }
+        }
+    }
+
+    /**
+     * 重新生成标题与笔记（跳过转写）。结果经 [onResult] 回 UI 提示：
+     * false = 转写缺失，无法重新生成。
+     */
+    fun regenerateNote(onResult: (Boolean) -> Unit) {
+        val id = recordingId ?: return
+        viewModelScope.launch {
+            onResult(PostProcessingScheduler.reenqueueNoteGeneration(appContext, id))
         }
     }
 
@@ -149,6 +201,7 @@ class DetailViewModel(
                     recordingId = recordingId,
                     dao = AppDatabase.getInstance(app).recordingDao(),
                     storage = StorageService.fromContext(app),
+                    appContext = app,
                 )
             }
         }
@@ -157,7 +210,8 @@ class DetailViewModel(
 
 /**
  * 录音详情屏幕（Metis M5.10 音频回放 + P6.9 融合笔记）：
- * 转写气泡（点击跳转播放位置）+ 融合笔记（Markdown 简化渲染）+ 照片附件网格 + 音频播放器。
+ * **AI 笔记为主体**（标题可编辑 + 复制/分享/重新生成操作行）+ 播放器 +
+ * 转写文本（点击跳转播放、播放中自动高亮滚动）+ 照片附件网格。
  *
  * [recordingId] 为 null 时从导航参数读取（MainActivity 路由 `detail/{recordingId}`，
  * 经 [LocalViewModelStoreOwner]（NavHost 内即 NavBackStackEntry）取 arguments）。
@@ -191,6 +245,7 @@ fun DetailScreen(
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableLongStateOf(0L) }
     var selectedAttachment by remember { mutableStateOf<RecordingAttachmentEntity?>(null) }
+    var showEditTitle by remember { mutableStateOf(false) }
 
     DisposableEffect(player) {
         if (player != null) {
@@ -241,6 +296,8 @@ fun DetailScreen(
     val backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     val handleBack: () -> Unit = onBack ?: { backDispatcher?.onBackPressed() }
 
+    val clipboard = LocalClipboardManager.current
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -281,9 +338,68 @@ fun DetailScreen(
                     onSeekMs = seekToMs,
                     onChunkClick = { seconds -> seekToMs((seconds * 1000).toLong()) },
                     onAttachmentClick = { selectedAttachment = it },
+                    onEditTitle = { showEditTitle = true },
+                    onCopyNote = {
+                        val summary = data.recording.summary
+                        if (!summary.isNullOrBlank()) {
+                            clipboard.setText(AnnotatedString(summary))
+                            android.widget.Toast.makeText(context, "已复制 AI 笔记", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onShare = {
+                        val shareText = buildShareText(data.recording)
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, shareText)
+                        }
+                        context.startActivity(Intent.createChooser(intent, "分享笔记"))
+                    },
+                    onRegenerate = {
+                        viewModel.regenerateNote { ok ->
+                            android.widget.Toast.makeText(
+                                context,
+                                if (ok) "已重新生成标题与笔记" else "转写缺失，无法重新生成",
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    },
                 )
             }
         }
+    }
+
+    // 标题编辑对话框
+    if (showEditTitle) {
+        val currentTitle = state.recording?.recording?.title.orEmpty()
+        var draft by remember(showEditTitle) { mutableStateOf(currentTitle) }
+        AlertDialog(
+            onDismissRequest = { showEditTitle = false },
+            title = { Text("编辑标题") },
+            text = {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    singleLine = true,
+                    label = { Text("标题") },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.saveTitle(draft)
+                        showEditTitle = false
+                    },
+                    enabled = draft.isNotBlank(),
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditTitle = false }) {
+                    Text("取消")
+                }
+            },
+        )
     }
 
     FullScreenImageViewer(
@@ -291,6 +407,19 @@ fun DetailScreen(
         storage = storage,
         onDismiss = { selectedAttachment = null },
     )
+}
+
+/** 分享文本：标题 + AI 笔记 + 转写全文（有则拼入）。 */
+private fun buildShareText(recording: RecordingEntity): String = buildString {
+    append(recording.title ?: "录音笔记")
+    recording.summary?.takeIf { it.isNotBlank() }?.let {
+        append("\n\n")
+        append(it)
+    }
+    recording.transcription?.takeIf { it.isNotBlank() }?.let {
+        append("\n\n—— 转写文本 ——\n")
+        append(it)
+    }
 }
 
 /** 按录音文件创建 [MediaPlayer]（prepareAsync 异步就绪）；离开组合时 release。 */
@@ -312,7 +441,10 @@ private fun rememberMediaPlayer(audioFile: File?): MediaPlayer? {
     return player
 }
 
-/** 详情主体：单 LazyColumn 承载全部区块，空区块自动隐藏。 */
+/**
+ * 详情主体：单 LazyColumn 承载全部区块（**AI 笔记为主体**）。
+ * 区块顺序：标题/meta/状态 → 操作行 → AI 笔记 → 播放器 → 转写文本 → 照片附件。
+ */
 @Composable
 private fun DetailContent(
     data: RecordingWithRelations,
@@ -326,20 +458,64 @@ private fun DetailContent(
     onSeekMs: (Long) -> Unit,
     onChunkClick: (Double) -> Unit,
     onAttachmentClick: (RecordingAttachmentEntity) -> Unit,
+    onEditTitle: () -> Unit,
+    onCopyNote: () -> Unit,
+    onShare: () -> Unit,
+    onRegenerate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val chunks = data.chunks
-    val summary = data.recording.summary
+    val recording = data.recording
+    val listState = rememberLazyListState()
+
+    // 当前播放位置对应的转写段（最后一个已开始的段；未播放为 -1）
+    val activeChunkIndex = if (positionMs > 0) {
+        chunks.indexOfLast { (it.startTime ?: 0.0) * 1000 <= positionMs }
+    } else {
+        -1
+    }
+
+    // 播放中自动滚动到当前段（区块前缀：meta + actions + note + player? + transcript 标题?）
+    LaunchedEffect(activeChunkIndex, isPlaying) {
+        if (isPlaying && activeChunkIndex >= 0 && chunks.isNotEmpty()) {
+            val prefix = 3 + (if (player != null) 1 else 0) + 1
+            runCatching { listState.animateScrollToItem(prefix + activeChunkIndex) }
+        }
+    }
 
     LazyColumn(
+        state = listState,
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { RecordingMeta(data) }
+        item(key = "meta") {
+            RecordingMeta(
+                data = data,
+                onEditTitle = onEditTitle,
+            )
+        }
+
+        item(key = "actions") {
+            DetailActionsRow(
+                hasNote = !recording.summary.isNullOrBlank(),
+                hasTranscription = recording.transcription != null,
+                onCopyNote = onCopyNote,
+                onShare = onShare,
+                onRegenerate = onRegenerate,
+            )
+        }
+
+        item(key = "note") {
+            NoteSection(
+                recording = recording,
+                hasTranscription = recording.transcription != null,
+                onRegenerate = onRegenerate,
+            )
+        }
 
         if (player != null) {
-            item {
+            item(key = "player") {
                 AudioPlayerSection(
                     player = player,
                     playerReady = playerReady,
@@ -352,35 +528,40 @@ private fun DetailContent(
         }
 
         if (chunks.isNotEmpty()) {
-            item { SectionTitle("转写文本") }
-            items(chunks, key = { it.id }) { chunk ->
+            item(key = "transcript_title") { SectionTitle("转写文本") }
+            itemsIndexed(chunks, key = { _, chunk -> chunk.id }) { index, chunk ->
                 TranscriptBubble(
                     chunk = chunk,
+                    active = index == activeChunkIndex,
                     onClick = { chunk.startTime?.let(onChunkClick) },
                 )
             }
         }
 
-        if (!summary.isNullOrBlank()) {
-            item { FusionNoteSection(summary) }
-        }
-
         if (images.isNotEmpty()) {
-            item { SectionTitle("照片附件 (${images.size})") }
-            item { AttachmentsGrid(images, storage, onAttachmentClick) }
+            item(key = "att_title") { SectionTitle("照片附件 (${images.size})") }
+            item(key = "att_grid") { AttachmentsGrid(images, storage, onAttachmentClick) }
         }
     }
 }
 
-/** 头部：标题 + 时间/时长/会议模式 meta + 状态徽标。 */
+/** 头部：标题（+ 编辑按钮）+ 时间/时长/会议模式 meta + 类型/状态 chip。 */
 @Composable
-private fun RecordingMeta(data: RecordingWithRelations, modifier: Modifier = Modifier) {
+private fun RecordingMeta(data: RecordingWithRelations, onEditTitle: () -> Unit, modifier: Modifier = Modifier) {
     val rec = data.recording
     Column(modifier) {
-        Text(
-            text = rec.title ?: "录音 #${rec.id}",
-            style = MaterialTheme.typography.titleLarge,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = rec.title ?: "录音 #${rec.id}",
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onEditTitle) {
+                Icon(painterResource(R.drawable.ic_edit), contentDescription = "编辑标题")
+            }
+        }
         Spacer(Modifier.height(4.dp))
         Text(
             text = buildString {
@@ -392,33 +573,96 @@ private fun RecordingMeta(data: RecordingWithRelations, modifier: Modifier = Mod
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(8.dp))
-        StatusChip(rec.status)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            RecordingTypeChip(meetingMode = rec.meetingMode)
+            Spacer(Modifier.width(8.dp))
+            RecordingStatusChip(
+                status = rec.status,
+                hasNote = rec.summary != null,
+            )
+        }
     }
 }
 
-/** 状态徽标（对齐 PC `_format_status` 中文文案）。 */
+/** 操作行：复制笔记 / 分享 / 重新生成（按可用数据启用）。 */
 @Composable
-private fun StatusChip(status: RecordingStatus, modifier: Modifier = Modifier) {
-    val label = when (status) {
-        RecordingStatus.COMPLETED -> "已完成"
-        RecordingStatus.PROCESSING -> "处理中"
-        RecordingStatus.FAILED -> "失败"
-        RecordingStatus.PENDING -> "待处理"
-    }
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        modifier = modifier,
+private fun DetailActionsRow(
+    hasNote: Boolean,
+    hasTranscription: Boolean,
+    onCopyNote: () -> Unit,
+    onShare: () -> Unit,
+    onRegenerate: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-        )
+        OutlinedButton(
+            onClick = onCopyNote,
+            enabled = hasNote,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text("复制笔记", maxLines = 1)
+        }
+        OutlinedButton(
+            onClick = onShare,
+            enabled = hasNote || hasTranscription,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text("分享", maxLines = 1)
+        }
+        OutlinedButton(
+            onClick = onRegenerate,
+            enabled = hasTranscription,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text("重新生成", maxLines = 1)
+        }
     }
 }
 
-/** 极简音频播放器：播放/暂停 + 进度条 + 当前位置文本。 */
+/**
+ * AI 笔记区（详情页主体）：
+ * - 有笔记 → Markdown 卡片；
+ * - FAILED → 错误卡（原因 + 重新生成入口）；
+ * - 其余（后处理链未跑完）→ 处理中指示卡。
+ */
+@Composable
+private fun NoteSection(
+    recording: RecordingEntity,
+    hasTranscription: Boolean,
+    onRegenerate: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val summary = recording.summary
+    when {
+        !summary.isNullOrBlank() -> FusionNoteSection(summary, modifier)
+        recording.status == RecordingStatus.FAILED -> SectionCard(modifier = modifier) {
+            Text(
+                text = "AI 处理失败",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Text(
+                text = recording.errorMessage ?: "处理过程中出现错误，可尝试重新生成",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            if (hasTranscription) {
+                TextButton(onClick = onRegenerate, modifier = Modifier.padding(top = 4.dp)) {
+                    Text("重新生成")
+                }
+            }
+        }
+        else -> SectionCard(modifier = modifier) {
+            ProcessingIndicator(text = "AI 笔记生成中…（转写 → 标题 → 笔记）")
+        }
+    }
+}
+
+/** 极简音频播放器：播放/暂停 + 进度条 + 当前位置文本（等宽时间戳）。 */
 @Composable
 private fun AudioPlayerSection(
     player: MediaPlayer,
@@ -430,15 +674,11 @@ private fun AudioPlayerSection(
     modifier: Modifier = Modifier,
 ) {
     val durationMs = if (playerReady) player.duration.toLong() else 0L
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = modifier.fillMaxWidth(),
+    SectionCard(
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        modifier = modifier,
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onTogglePlay, enabled = playerReady) {
                 if (isPlaying) {
                     PauseIcon()
@@ -463,7 +703,7 @@ private fun AudioPlayerSection(
                 )
                 Text(
                     text = "${formatMs(positionMs)} / ${formatMs(durationMs)}",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = com.example.ai_recorder_android.ui.theme.TimestampStyle,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -483,17 +723,22 @@ private fun PauseIcon(modifier: Modifier = Modifier) {
     }
 }
 
-/** 单条转写气泡：时间段 + 说话人 + 内容；点击跳转播放位置（对齐 PC TranscriptView）。 */
+/**
+ * 单条转写气泡：时间段 + 说话人 + 内容；点击跳转播放位置（对齐 PC TranscriptView）。
+ * [active] = 当前播放位置所在段：主色描边 + 高亮容器色，实现时间轴联动。
+ */
 @Composable
 private fun TranscriptBubble(
     chunk: TranscriptChunkEntity,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    active: Boolean = false,
 ) {
+    val scheme = MaterialTheme.colorScheme
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.large,
+        color = if (active) scheme.secondaryContainer else scheme.surfaceContainer,
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
@@ -501,7 +746,7 @@ private fun TranscriptBubble(
                 Text(
                     text = formatTime(chunk.startTime, chunk.endTime),
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    color = if (active) scheme.onSecondaryContainer else scheme.primary,
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -523,37 +768,28 @@ private fun TranscriptBubble(
 @Composable
 private fun FusionNoteSection(summary: String, modifier: Modifier = Modifier) {
     val blocks = remember(summary) { parseMarkdown(summary) }
-    Column(modifier) {
-        SectionTitle("融合笔记")
-        Spacer(Modifier.height(8.dp))
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(Modifier.padding(12.dp)) {
-                blocks.forEach { block ->
-                    when (block) {
-                        is NoteBlock.Heading -> Text(
-                            text = block.text,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(top = 6.dp),
-                        )
+    SectionCard(modifier = modifier) {
+        blocks.forEach { block ->
+            when (block) {
+                is NoteBlock.Heading -> Text(
+                    text = block.text,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
 
-                        is NoteBlock.Bullet -> Row(Modifier.padding(top = 4.dp)) {
-                            Text("•", color = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(8.dp))
-                            Text(block.text, style = MaterialTheme.typography.bodyMedium)
-                        }
-
-                        is NoteBlock.Paragraph -> Text(
-                            text = block.text,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                    }
+                is NoteBlock.Bullet -> Row(Modifier.padding(top = 4.dp)) {
+                    Text("•", color = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text(block.text, style = MaterialTheme.typography.bodyMedium)
                 }
+
+                is NoteBlock.Paragraph -> Text(
+                    text = block.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
             }
         }
     }
@@ -612,7 +848,7 @@ private fun AttachmentsGrid(
                         placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant),
                         modifier = Modifier
                             .aspectRatio(1f)
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(MaterialTheme.shapes.small)
                             .clickable { onAttachmentClick(attachment) },
                     )
                 }
@@ -658,17 +894,6 @@ private fun FullScreenImageViewer(
             }
         }
     }
-}
-
-/** 区块标题。 */
-@Composable
-private fun SectionTitle(text: String, modifier: Modifier = Modifier) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.SemiBold,
-        modifier = modifier,
-    )
 }
 
 /** 空态/错误态。 */

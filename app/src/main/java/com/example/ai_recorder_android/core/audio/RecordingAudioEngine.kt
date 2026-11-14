@@ -100,7 +100,15 @@ class AudioRecorderEngineAdapter(
 /**
  * 引擎工厂（todo 16 编排层注入用，单测替换为假工厂）。
  * 每次 [create] 返回独立引擎实例（引擎不可复用）。
+ *
+ * [config] 携带本次会话的采集配置（音源 + MediaProjection 授权结果），
+ * 工厂按音源选择引擎：mic → [AudioRecorderEngineAdapter]；system/mixed → [SystemAudioEngineAdapter]。
  */
 fun interface RecordingAudioEngineFactory {
-    fun create(recordingId: Long, outputDir: File, events: RecordingEngineEvents): RecordingAudioEngine
+    fun create(
+        recordingId: Long,
+        outputDir: File,
+        events: RecordingEngineEvents,
+        config: RecordingSessionConfig,
+    ): RecordingAudioEngine
 }

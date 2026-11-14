@@ -10,10 +10,12 @@ import android.os.Looper
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.IntentCompat
 import com.example.ai_recorder_android.App
 import com.example.ai_recorder_android.BuildConfig
 import com.example.ai_recorder_android.cloud.asr.DashScopeRealtimeConnector
 import com.example.ai_recorder_android.core.audio.PcmFrameDispatcher
+import com.example.ai_recorder_android.core.audio.RecordingSessionConfig
 import com.example.ai_recorder_android.service.transcription.DashScopeRealtimeAdapter
 import com.example.ai_recorder_android.data.db.AppDatabase
 import com.example.ai_recorder_android.data.repo.UserConfigRepository
@@ -39,8 +41,9 @@ import kotlinx.coroutines.flow.first
  * 降级策略：POST_NOTIFICATIONS 未授权（API 33+）或 startForeground 抛异常时
  * 服务仍继续录音（通知不显示），不崩溃。
  *
- * 注意：本 todo 不实现 MediaProjection（todo 11）；Manifest 已声明
- * `foregroundServiceType="microphone|mediaProjection"`，此处仅以 microphone 类型启动。
+ * 采集配置：START intent 携带 [RecordingSessionConfig]（音源 + 会议模式 +
+ * MediaProjection 授权结果），音源决定引擎选择；system/mixed 时前台类型含
+ * MEDIA_PROJECTION 且先于 getMediaProjection 调用（API 34+ 顺序要求）。
  */
 class RecordingService : Service() {
 
@@ -57,6 +60,10 @@ class RecordingService : Service() {
         // ---- Extra 键 ----
 
         const val EXTRA_OUTPUT_DIR = "output_dir"
+        const val EXTRA_MEETING_MODE = "meeting_mode"
+        const val EXTRA_AUDIO_SOURCE = "audio_source"
+        const val EXTRA_PROJECTION_RESULT_CODE = "projection_result_code"
+        const val EXTRA_PROJECTION_RESULT_DATA = "projection_result_data"
 
         /** 服务当前是否在录音（instrumented 测试断言用）。 */
         @Volatile
@@ -86,10 +93,18 @@ class RecordingService : Service() {
 
         // ---- Intent 工厂（UI / 通知动作用） ----
 
-        fun startIntent(context: Context, outputDir: File): Intent =
+        fun startIntent(
+            context: Context,
+            outputDir: File,
+            config: RecordingSessionConfig = RecordingSessionConfig.DEFAULT,
+        ): Intent =
             Intent(context, RecordingService::class.java)
                 .setAction(ACTION_START_RECORDING)
                 .putExtra(EXTRA_OUTPUT_DIR, outputDir.absolutePath)
+                .putExtra(EXTRA_MEETING_MODE, config.meetingMode)
+                .putExtra(EXTRA_AUDIO_SOURCE, config.audioSource)
+                .putExtra(EXTRA_PROJECTION_RESULT_CODE, config.projectionResultCode)
+                .putExtra(EXTRA_PROJECTION_RESULT_DATA, config.projectionResultData)
 
         fun stopIntent(context: Context): Intent =
             Intent(context, RecordingService::class.java).setAction(ACTION_STOP_RECORDING)
@@ -157,12 +172,14 @@ class RecordingService : Service() {
             return
         }
         val dir = File(intent.getStringExtra(EXTRA_OUTPUT_DIR) ?: filesDir.absolutePath)
-        // 先调用 startForeground 满足系统5秒要求，再启动录音
-        // （即使录音失败，服务也必须在5秒内调用 startForeground）
-        startForegroundInternal(-1L)
+        val config = configFromIntent(intent)
+        // 先调用 startForeground 满足系统5秒要求，再启动录音。
+        // system/mixed 音源额外要求：必须先以含 MEDIA_PROJECTION 的前台类型进入服务，
+        // 才允许引擎内 getMediaProjection（API 34+ 硬性顺序，否则 SecurityException）。
+        startForegroundInternal(-1L, needsMediaProjection = config.needsProjection)
         serviceScope.launch {
             try {
-                val rec = coordinator.startRecording(outputDir = dir)
+                val rec = coordinator.startRecording(outputDir = dir, config = config)
                 currentRecordingId = rec.id
                 isRecording = true
                 mainHandler.post(ticker)
@@ -175,6 +192,19 @@ class RecordingService : Service() {
             }
         }
     }
+
+    /** 从 Intent extras 还原会话采集配置（旧版本/无 extras 的调用方回退默认麦克风录音）。 */
+    private fun configFromIntent(intent: Intent): RecordingSessionConfig =
+        RecordingSessionConfig(
+            meetingMode = intent.getBooleanExtra(EXTRA_MEETING_MODE, false),
+            audioSource = RecordingSessionConfig.sanitizeSource(intent.getStringExtra(EXTRA_AUDIO_SOURCE)),
+            projectionResultCode = intent.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, 0),
+            projectionResultData = IntentCompat.getParcelableExtra(
+                intent,
+                EXTRA_PROJECTION_RESULT_DATA,
+                Intent::class.java,
+            ),
+        )
 
     /**
      * realtime 档：启动 DashScope Paraformer 流式转写并挂接 PCM 帧投递。
@@ -221,19 +251,21 @@ class RecordingService : Service() {
         Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
     }
 
-    private fun startForegroundInternal(recordingId: Long) {
+    private fun startForegroundInternal(recordingId: Long, needsMediaProjection: Boolean = false) {
         if (!RecordingNotification.hasNotificationPermission(this)) {
             Log.w(TAG, "POST_NOTIFICATIONS 未授权：通知不显示，服务降级运行")
         }
         val notification = RecordingNotification.buildRecordingNotification(this, recordingId, 0L)
+        // Manifest 已声明 microphone|mediaProjection；system/mixed 音源会话追加
+        // MEDIA_PROJECTION 类型（必须在 getMediaProjection 之前，API 34+）。
+        val types = if (needsMediaProjection) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
         try {
-            // Manifest 声明 microphone|mediaProjection，此处仅以 microphone 类型启动
-            // （MediaProjection 由 todo 11 实现，届时按需追加类型）。
-            startForeground(
-                RecordingNotification.NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-            )
+            startForeground(RecordingNotification.NOTIFICATION_ID, notification, types)
             isForeground = true
         } catch (e: Exception) {
             // 权限缺失 / while-in-use 违规等：降级继续录音，不崩溃

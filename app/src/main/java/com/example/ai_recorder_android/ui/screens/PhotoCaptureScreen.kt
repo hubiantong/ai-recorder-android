@@ -227,7 +227,7 @@ fun PhotoCaptureResult(
                         modifier = Modifier
                             .padding(top = 16.dp)
                             .size(160.dp)
-                            .clip(RoundedCornerShape(12.dp)),
+                            .clip(MaterialTheme.shapes.medium),
                     )
                 }
                 Text(

@@ -125,6 +125,11 @@ class UserConfigRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { it[Keys.THEME] = theme }
     }
 
+    /** Android 12+ 动态配色（壁纸取色）；默认关闭，保持品牌色稳定。 */
+    suspend fun setDynamicColor(enabled: Boolean) {
+        dataStore.edit { it[Keys.DYNAMIC_COLOR] = enabled }
+    }
+
     /** 首启引导是否已完成。 */
     suspend fun setOnboardingDone(done: Boolean) {
         dataStore.edit { it[Keys.ONBOARDING_DONE] = done }
@@ -150,6 +155,7 @@ class UserConfigRepository(private val dataStore: DataStore<Preferences>) {
             meetingScreenIndex = this[Keys.MEETING_SCREEN_INDEX] ?: d.meetingScreenIndex,
             meetingVadSilenceThreshold = this[Keys.MEETING_VAD_SILENCE_THRESHOLD] ?: d.meetingVadSilenceThreshold,
             theme = this[Keys.THEME] ?: d.theme,
+            dynamicColor = this[Keys.DYNAMIC_COLOR] ?: d.dynamicColor,
             onboardingDone = this[Keys.ONBOARDING_DONE] ?: d.onboardingDone,
         )
     }
@@ -170,6 +176,7 @@ class UserConfigRepository(private val dataStore: DataStore<Preferences>) {
         val MEETING_SCREEN_INDEX = intPreferencesKey("meeting_screen_index")
         val MEETING_VAD_SILENCE_THRESHOLD = doublePreferencesKey("meeting_vad_silence_threshold")
         val THEME = stringPreferencesKey("theme")
+        val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
     }
 
@@ -214,5 +221,7 @@ data class UserConfig(
     val meetingScreenIndex: Int = 0,
     val meetingVadSilenceThreshold: Double = 0.01,
     val theme: String = "system",
+    /** Android 12+ 动态配色开关；默认 false（品牌色优先，不随壁纸变化）。 */
+    val dynamicColor: Boolean = false,
     val onboardingDone: Boolean = false,
 )

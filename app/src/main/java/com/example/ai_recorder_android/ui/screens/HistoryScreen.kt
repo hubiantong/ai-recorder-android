@@ -3,15 +3,21 @@ package com.example.ai_recorder_android.ui.screens
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ListItem
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
@@ -19,12 +25,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -32,19 +38,25 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.navigation.NavHostController
 import com.example.ai_recorder_android.R
-import com.example.ai_recorder_android.Routes
 import com.example.ai_recorder_android.data.db.AppDatabase
 import com.example.ai_recorder_android.data.db.RecordingDao
 import com.example.ai_recorder_android.data.db.RecordingEntity
 import com.example.ai_recorder_android.data.db.RecordingsByDay
+import com.example.ai_recorder_android.ui.components.EmptyStateView
+import com.example.ai_recorder_android.ui.components.RecordingStatusChip
+import com.example.ai_recorder_android.ui.components.RecordingTypeChip
+import com.example.ai_recorder_android.ui.components.SectionCard
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import java.time.Instant
 import java.time.LocalDate
@@ -52,20 +64,25 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-/** 历史列表 UI 状态：按天分组结果 + 加载标志。 */
+/**
+ * 历史列表 UI 状态：按天分组结果 + 加载/错误标志 + 当前查询（区分「无记录」与「搜索无结果」）。
+ */
 data class HistoryUiState(
     val groups: List<RecordingsByDay> = emptyList(),
     val isLoading: Boolean = false,
+    val query: String = "",
+    val error: String? = null,
 )
 
 /**
  * 历史列表 ViewModel：RecordingDao 构造注入。
  *
- * - 空白查询 → [RecordingDao.getRecordingsGroupedByDay]（按天分组，组序/组内均倒序）；
- * - 非空白查询 → [RecordingDao.searchRecordings]（title OR transcription LIKE），
- *   结果同样按天分组（对齐 PC `refresh()` 对搜索结果分组的行为）；
- * - 300ms 防抖由 UI 层 `snapshotFlow` + `debounce` 完成（任务书指定），
- *   本类只负责把防抖后的查询映射为加载结果。
+ * - 空白查询 → [RecordingDao.observeAllRecordings]；非空白 → [RecordingDao.observeSearchRecordings]
+ *   （title OR transcription LIKE），结果按天分组；
+ * - **Flow 实时刷新**：AI 后处理链落库（转写/标题/笔记）后列表自动更新，
+ *   「AI 处理中 → 已完成」无需手动刷新；
+ * - 查询异常 → [HistoryUiState.error]（错误态 + 重试）；
+ * - 300ms 防抖由 UI 层 `snapshotFlow` + `debounce` 完成（任务书指定）。
  */
 class HistoryViewModel(
     private val dao: RecordingDao,
@@ -74,8 +91,11 @@ class HistoryViewModel(
 
     private val query = MutableStateFlow("")
 
-    val uiState: StateFlow<HistoryUiState> = query
-        .mapLatest { raw -> load(raw) }
+    /** 重试触发器：递增使 uiState 链重新订阅（错误态重试入口）。 */
+    private val retryTrigger = MutableStateFlow(0)
+
+    val uiState: StateFlow<HistoryUiState> = combine(query, retryTrigger) { q, _ -> q }
+        .flatMapLatest { raw -> observe(raw) }
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
@@ -86,17 +106,34 @@ class HistoryViewModel(
         query.value = newQuery
     }
 
-    private suspend fun load(rawQuery: String): HistoryUiState {
-        val trimmed = rawQuery.trim()
-        val groups = if (trimmed.isEmpty()) {
-            dao.getRecordingsGroupedByDay(zoneId)
-        } else {
-            dao.searchRecordings(trimmed).groupByDay(zoneId)
-        }
-        return HistoryUiState(groups = groups)
+    /** 错误态重试：重新订阅观察流。 */
+    fun retry() {
+        retryTrigger.value += 1
     }
 
-    /** 搜索结果按本地日期（yyyy-MM-dd）分组；searchRecordings 已倒序，groupBy 保持首次出现顺序。 */
+    private fun observe(rawQuery: String): Flow<HistoryUiState> {
+        val trimmed = rawQuery.trim()
+        val source = if (trimmed.isEmpty()) {
+            dao.observeAllRecordings()
+        } else {
+            dao.observeSearchRecordings(trimmed)
+        }
+        return source
+            .map { list ->
+                HistoryUiState(groups = list.groupByDay(zoneId), query = trimmed, isLoading = false)
+            }
+            .catch { e ->
+                emit(
+                    HistoryUiState(
+                        query = trimmed,
+                        isLoading = false,
+                        error = e.message ?: "加载录音记录失败",
+                    ),
+                )
+            }
+    }
+
+    /** 搜索结果按本地日期（yyyy-MM-dd）分组；observe* 已倒序，groupBy 保持首次出现顺序。 */
     private fun List<RecordingEntity>.groupByDay(zoneId: ZoneId): List<RecordingsByDay> =
         groupBy { Instant.ofEpochMilli(it.createdAt).atZone(zoneId).toLocalDate().toString() }
             .map { (day, recordings) -> RecordingsByDay(day, recordings) }
@@ -108,17 +145,21 @@ class HistoryViewModel(
 }
 
 /**
- * 录音历史列表：搜索栏 + 按天分组列表（今天/昨天/其他日期）+ 空状态。
+ * 录音历史列表：搜索栏 + 文件导入入口 + 按天分组列表（今天/昨天/其他日期）。
  *
- * 点击记录项 → `navController.navigate("detail/{recordingId}")`。
+ * 记录项卡片：标题 + 类型/状态 chip + 日期时长 + AI 摘要预览（处理中/失败有独立提示）。
+ * 独立状态：加载中 / 无录音记录 / 搜索无结果 / 加载错误（可重试）。
+ *
+ * 点击记录项 → [onRecordingClick]（MainActivity 导航到 detail/{recordingId}）。
  */
 @OptIn(FlowPreview::class)
 @Composable
 fun HistoryScreen(
-    navController: NavHostController,
+    onRecordingClick: (Long) -> Unit,
+    onFileUploadClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     val viewModel: HistoryViewModel = viewModel {
         HistoryViewModel(AppDatabase.getInstance(context).recordingDao())
     }
@@ -133,22 +174,42 @@ fun HistoryScreen(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        TextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
-            placeholder = { Text("搜索标题或转写内容") },
-            leadingIcon = { Icon(painter = painterResource(R.drawable.ic_search), contentDescription = null) },
-            singleLine = true,
-        )
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("搜索标题或转写内容") },
+                leadingIcon = { Icon(painter = painterResource(R.drawable.ic_search), contentDescription = null) },
+                singleLine = true,
+            )
+            // 文件转写导入入口（上传本地音频 → 转写 → 落库为录音记录）
+            IconButton(onClick = onFileUploadClick) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_upload),
+                    contentDescription = "文件转写",
+                )
+            }
+        }
         when {
+            uiState.error != null -> ErrorState(
+                message = uiState.error ?: "加载录音记录失败",
+                onRetry = viewModel::retry,
+            )
             uiState.isLoading -> LoadingState()
+            uiState.groups.isEmpty() && uiState.query.isNotBlank() -> SearchEmptyState(
+                query = uiState.query,
+            )
             uiState.groups.isEmpty() -> EmptyState()
             else -> RecordingList(
                 groups = uiState.groups,
-                onRecordingClick = { id -> navController.navigate("${Routes.DETAIL}/$id") },
+                onRecordingClick = onRecordingClick,
             )
         }
     }
@@ -161,7 +222,10 @@ private fun RecordingList(
     onRecordingClick: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    LazyColumn(modifier = modifier.fillMaxSize()) {
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 16.dp),
+    ) {
         groups.forEach { group ->
             item(key = "header_${group.day}") {
                 HistorySectionHeader(day = group.day)
@@ -187,24 +251,71 @@ private fun HistorySectionHeader(day: String, modifier: Modifier = Modifier) {
     )
 }
 
-/** 单条录音：标题（或默认"录音 yyyy-MM-dd HH:mm:ss"）+ 日期 · 时长。 */
+/**
+ * 单条录音卡片：标题 + 类型/状态 chip + 日期 · 时长 + AI 摘要预览。
+ * - 处理中（COMPLETED 且 summary 未生成）：「AI 笔记生成中…」；
+ * - 失败（FAILED）：errorMessage 红字；
+ * - 已完成：摘要两行省略预览。
+ */
 @Composable
 private fun RecordingItem(
     recording: RecordingEntity,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    ListItem(
-        headlineContent = {
+    SectionCard(
+        contentPadding = PaddingValues(12.dp),
+        modifier = modifier
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clickable(onClick = onClick),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = recordingTitle(recording),
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            RecordingTypeChip(meetingMode = recording.meetingMode)
+            Spacer(modifier = Modifier.width(4.dp))
+            RecordingStatusChip(
+                status = recording.status,
+                hasNote = recording.summary != null,
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = recordingMeta(recording),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        when {
+            recording.status == com.example.ai_recorder_android.data.db.RecordingStatus.FAILED -> Text(
+                text = recording.errorMessage ?: "录音处理失败",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            recording.summary != null -> Text(
+                text = recording.summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            else -> Text(
+                text = "AI 笔记生成中…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-        },
-        supportingContent = { Text(text = recordingMeta(recording)) },
-        modifier = modifier.clickable(onClick = onClick),
-    )
+        }
+    }
 }
 
 /** 加载中：居中转圈。 */
@@ -219,29 +330,63 @@ private fun LoadingState(modifier: Modifier = Modifier) {
     }
 }
 
-/** 空状态：居中图标 + "暂无录音记录"。 */
+/** 空状态：尚无任何录音记录。 */
 @Composable
 private fun EmptyState(modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Icon(
-            painter = painterResource(R.drawable.ic_history),
-            contentDescription = null,
-            modifier = Modifier.size(64.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            text = "暂无录音记录",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 12.dp),
-        )
-    }
+    EmptyStateView(
+        title = "暂无录音记录",
+        description = "点击底部「首页」开始录音，或在右上角导入音频文件转写",
+        icon = {
+            Icon(
+                painter = painterResource(R.drawable.ic_history),
+                contentDescription = null,
+                modifier = Modifier.size(56.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        modifier = modifier.fillMaxSize(),
+    )
+}
+
+/** 搜索无结果：与「无记录」区分的独立状态。 */
+@Composable
+private fun SearchEmptyState(query: String, modifier: Modifier = Modifier) {
+    EmptyStateView(
+        title = "未找到相关录音",
+        description = "没有与「$query」匹配的标题或转写内容，换个关键词试试",
+        icon = {
+            Icon(
+                painter = painterResource(R.drawable.ic_search),
+                contentDescription = null,
+                modifier = Modifier.size(56.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        modifier = modifier.fillMaxSize(),
+    )
+}
+
+/** 加载错误：错误信息 + 重试按钮。 */
+@Composable
+private fun ErrorState(message: String, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+    EmptyStateView(
+        title = "加载失败",
+        description = message,
+        icon = {
+            Icon(
+                painter = painterResource(R.drawable.ic_history),
+                contentDescription = null,
+                modifier = Modifier.size(56.dp),
+                tint = MaterialTheme.colorScheme.error,
+            )
+        },
+        action = {
+            Button(onClick = onRetry) {
+                Text("重试")
+            }
+        },
+        modifier = modifier.fillMaxSize(),
+    )
 }
 
 // ---------- 纯函数（可 JVM 单测） ----------

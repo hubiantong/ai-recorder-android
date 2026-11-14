@@ -16,6 +16,7 @@ local.properties
 /.omo
 /.kotlin
 /.codegraph
+.zcode/
 
 # Local secrets (never commit real API keys)
 secrets.properties

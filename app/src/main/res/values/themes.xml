@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.Airecorderandroid" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- 窗口底色用品牌浅色底；实际 UI 颜色由 Compose 品牌主题决定 -->
+    <style name="Theme.Airecorderandroid" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/brand_background_light</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>
