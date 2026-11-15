@@ -53,15 +53,24 @@ class ScreensComposeTest {
         )
         val vm = HomeViewModel(db.recordingDao(), coordinator)
 
-        // 一条已完成（含 AI 笔记）的录音：笔记区/录音区应展示，空态不出现
+        // 一条已完成（含 AI 笔记）的录音进笔记区 + 一条处理中的录音进录音区（两区按笔记是否生成互补），空态不出现
         runBlocking {
+            val now = System.currentTimeMillis()
             db.recordingDao().insertRecording(
                 RecordingEntity(
                     title = "测试会议录音",
                     audioPath = "test.wav",
                     summary = "## 会议摘要\n- 要点一",
                     status = RecordingStatus.COMPLETED,
-                    createdAt = System.currentTimeMillis(),
+                    createdAt = now,
+                ),
+            )
+            db.recordingDao().insertRecording(
+                RecordingEntity(
+                    title = "处理中的录音",
+                    audioPath = "test_processing.wav",
+                    status = RecordingStatus.PROCESSING,
+                    createdAt = now - 1,
                 ),
             )
         }
@@ -84,6 +93,8 @@ class ScreensComposeTest {
         // 笔记/录音卡片内容（标题 + 预览跳过 ## 标题行）
         composeTestRule.onNodeWithText("测试会议录音").assertIsDisplayed()
         composeTestRule.onNodeWithText("要点一", substring = true).assertIsDisplayed()
+        // 录音区条目（未生成笔记的处理中录音）按新分区渲染
+        composeTestRule.onNodeWithText("处理中的录音").assertIsDisplayed()
         // 有记录时空态不出现
         composeTestRule.onNodeWithText("还没有录音").assertDoesNotExist()
     }

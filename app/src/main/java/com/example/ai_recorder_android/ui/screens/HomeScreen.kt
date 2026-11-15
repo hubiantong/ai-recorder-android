@@ -111,7 +111,7 @@ class HomeViewModel(
     companion object {
         private const val TAG = "HomeViewModel"
 
-        /** 主页展示条数：最近录音 / 最近 AI 笔记。 */
+        /** 主页展示条数：最近录音（未生成笔记）/ 最近 AI 笔记。 */
         const val RECENT_RECORDINGS_LIMIT = 5
         const val RECENT_NOTES_LIMIT = 3
 
@@ -141,9 +141,12 @@ internal fun deriveHomeUiState(
             it.status == RecordingStatus.PROCESSING ||
             (it.status == RecordingStatus.COMPLETED && it.summary == null)
     }
+    // 两区按 summary 是否已生成分区互补：已生成 →「最近 AI 笔记」，未生成（待处理/处理中/失败）→「最近录音」，
+    // 同一条记录不会同时出现在两区
+    val (noted, unNoted) = recordings.partition { it.summary != null }
     return HomeUiState(
-        recentRecordings = recordings.take(HomeViewModel.RECENT_RECORDINGS_LIMIT),
-        recentNotes = recordings.filter { it.summary != null }.take(HomeViewModel.RECENT_NOTES_LIMIT),
+        recentRecordings = unNoted.take(HomeViewModel.RECENT_RECORDINGS_LIMIT),
+        recentNotes = noted.take(HomeViewModel.RECENT_NOTES_LIMIT),
         // 会话活动中/过渡期（录音尚未停止、笔记尚未开始生成）：不显示全局处理指示，由「录音进行中」横幅承担
         hasProcessing = if (session.isActive || session.isBusy) false else hasPendingNotes,
         session = session,
@@ -236,7 +239,7 @@ fun HomeScreen(
             }
         }
 
-        // 最近录音及处理状态（无记录时空态兜底）
+        // 最近录音：仅未生成笔记的记录（待处理/处理中/失败；已生成笔记的在上方「最近 AI 笔记」区）
         if (uiState.recentRecordings.isNotEmpty()) {
             item(key = "recordings_header") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -250,9 +253,24 @@ fun HomeScreen(
                 RecordingListItem(
                     recording = recording,
                     onClick = { onRecordingClick(recording.id) },
-                    // 笔记预览由上方「最近 AI 笔记」承担，不重复展示
+                    // 录音区记录均未生成笔记，无预览可展示
                     showSummaryPreview = false,
                 )
+            }
+        } else if (uiState.recentNotes.isNotEmpty()) {
+            // 全部录音都已生成笔记：轻量提示 + 历史页入口（历史页唯一入口，不能随列表一起消失）
+            item(key = "all_noted_hint") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "近期录音都已生成笔记",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onSeeAllHistoryClick) {
+                        Text("查看全部历史")
+                    }
+                }
             }
         } else if (!uiState.isLoading) {
             item(key = "empty") {
