@@ -24,20 +24,28 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.coerceIn
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -54,10 +62,12 @@ import com.example.ai_recorder_android.service.RecordingPhase
 import com.example.ai_recorder_android.service.RecordingService
 import com.example.ai_recorder_android.service.RecordingSessionState
 import com.example.ai_recorder_android.ui.components.BrandChip
+import com.example.ai_recorder_android.ui.components.EmptyStateView
 import com.example.ai_recorder_android.ui.components.LabeledCircleButton
 import com.example.ai_recorder_android.ui.components.PulsingDot
 import com.example.ai_recorder_android.ui.components.WaveformView
 import com.example.ai_recorder_android.ui.theme.LocalBrandSemanticColors
+import com.example.ai_recorder_android.ui.theme.Sizes
 import com.example.ai_recorder_android.ui.theme.Spacing
 import com.example.ai_recorder_android.ui.theme.tabularNums
 import java.io.File
@@ -361,6 +371,13 @@ fun RecordingScreen(
     val photoManager = rememberPhotoAttachmentManager()
     val photoController = rememberPhotoCaptureController(photoManager)
 
+    // 结束录音防误触：红色圆钮先弹确认，确认后才真正发送停止命令
+    var showStopConfirm by rememberSaveable { mutableStateOf(false) }
+    // 会话已结束（如服务侧自行完成/出错）时收起弹窗，避免残留失效确认框
+    LaunchedEffect(session.isActive) {
+        if (!session.isActive) showStopConfirm = false
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -403,11 +420,12 @@ fun RecordingScreen(
             waveform = waveform,
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(Spacing.lg))
 
         // 实时转写气泡区（占剩余空间）
         PartialTranscriptList(
             partials = partials,
+            phase = session.phase,
             modifier = Modifier.weight(1f),
         )
 
@@ -417,7 +435,8 @@ fun RecordingScreen(
         RecordingControls(
             session = session,
             onStartClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
-            onStopClick = viewModel::onStopClick,
+            // 结束按钮先弹确认，确认后才发送停止命令
+            onStopClick = { showStopConfirm = true },
             onPauseClick = viewModel::onPauseClick,
             onResumeClick = viewModel::onResumeClick,
         )
@@ -428,7 +447,7 @@ fun RecordingScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(1.dp)
+                .height(Spacing.hairline)
                 .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
         )
 
@@ -446,7 +465,7 @@ fun RecordingScreen(
                 contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.xs),
                 modifier = Modifier
                     .weight(1f)
-                    .height(40.dp),
+                    .height(Sizes.secondaryButtonHeight),
             ) {
                 Text("拍照", style = MaterialTheme.typography.bodyMedium)
             }
@@ -455,12 +474,39 @@ fun RecordingScreen(
                 contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.xs),
                 modifier = Modifier
                     .weight(1f)
-                    .height(40.dp),
+                    .height(Sizes.secondaryButtonHeight),
             ) {
                 Text("文件转写", style = MaterialTheme.typography.bodyMedium)
             }
         }
         PhotoCaptureResult(controller = photoController, manager = photoManager)
+    }
+
+    // 结束录音确认：明确告知后果（停止保存 + 后台生成笔记），取消键让用户无缝继续
+    if (showStopConfirm) {
+        AlertDialog(
+            onDismissRequest = { showStopConfirm = false },
+            title = { Text("结束录音？") },
+            text = { Text("录音将停止并保存，AI 笔记会在后台自动生成。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showStopConfirm = false
+                        viewModel.onStopClick()
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) {
+                    Text("结束录音")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStopConfirm = false }) {
+                    Text("继续录音")
+                }
+            },
+        )
     }
 }
 
@@ -479,6 +525,9 @@ private fun RecordingHero(
     val isRecording = session.phase == RecordingPhase.RECORDING
     val isPaused = session.phase == RecordingPhase.PAUSED
     val semantic = LocalBrandSemanticColors.current
+    // 波形高度随屏幕高度缩放（固定值在小屏挤占转写区、大屏又太空），夹取兜底
+    val waveHeight = (LocalConfiguration.current.screenHeightDp * Sizes.waveScreenFraction).dp
+        .coerceIn(Sizes.waveHeightMin, Sizes.waveHeightMax)
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -515,7 +564,7 @@ private fun RecordingHero(
             active = isRecording,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(100.dp),
+                .height(waveHeight),
         )
     }
 }
@@ -544,28 +593,25 @@ private fun formatElapsed(ms: Long): String {
     }
 }
 
-/** 实时转写气泡列表：品牌圆角卡片 + 进出场动画；空态显示提示文案。 */
+/** 实时转写气泡列表：品牌圆角卡片 + 进出场动画；空态按录音阶段给出轻量引导。 */
 @Composable
 private fun PartialTranscriptList(
     partials: List<PartialTranscript>,
+    phase: RecordingPhase,
     modifier: Modifier = Modifier,
 ) {
     if (partials.isEmpty()) {
-        Box(
-            modifier = modifier.fillMaxWidth(),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "实时转写将显示在这里",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        // 标题固定（Compose 测试断言依赖），描述随阶段变化引导下一步
+        EmptyStateView(
+            title = "实时转写将显示在这里",
+            description = transcriptEmptyHint(phase),
+            modifier = modifier,
+        )
         return
     }
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(Spacing.sm),
     ) {
         items(partials, key = { it.id }) { partial ->
             Surface(
@@ -579,11 +625,20 @@ private fun PartialTranscriptList(
                 Text(
                     text = partial.text,
                     style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.padding(horizontal = Spacing.md, vertical = Spacing.sm),
                 )
             }
         }
     }
+}
+
+/** 转写空态引导文案：按录音阶段告诉用户「现在会发生什么」。 */
+internal fun transcriptEmptyHint(phase: RecordingPhase): String = when (phase) {
+    RecordingPhase.RECORDING -> "正在聆听，开始说话即可实时转写"
+    RecordingPhase.PAUSED -> "已暂停，继续录音后转写将接续"
+    RecordingPhase.STARTING -> "正在启动录音…"
+    RecordingPhase.STOPPING -> "正在保存录音…"
+    else -> "开始录音后，识别内容会实时显示在这里"
 }
 
 /**
@@ -609,7 +664,7 @@ private fun RecordingControls(
     if (session.isActive) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(40.dp, Alignment.CenterHorizontally),
+            horizontalArrangement = Arrangement.spacedBy(Sizes.controlsGap, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             LabeledCircleButton(
@@ -617,7 +672,7 @@ private fun RecordingControls(
                 label = if (canPause) "暂停" else "继续",
                 enabled = canPause || canResume,
                 onClick = if (canPause) onPauseClick else onResumeClick,
-                size = 72.dp,
+                size = Sizes.circlePrimary,
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
             )
@@ -626,7 +681,7 @@ private fun RecordingControls(
                 label = "结束",
                 enabled = canStop,
                 onClick = onStopClick,
-                size = 64.dp,
+                size = Sizes.circleStop,
                 containerColor = MaterialTheme.colorScheme.errorContainer,
                 contentColor = MaterialTheme.colorScheme.onErrorContainer,
             )
@@ -641,7 +696,7 @@ private fun RecordingControls(
                 label = "开始录音",
                 enabled = canStart,
                 onClick = onStartClick,
-                size = 80.dp,
+                size = Sizes.circleStart,
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
             )

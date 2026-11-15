@@ -29,6 +29,9 @@ object Spacing {
 
     /** 紧凑卡片内边距（列表项卡片）。 */
     val cardPadTight: Dp = 12.dp
+
+    /** 细分隔线高度。 */
+    val hairline: Dp = 1.dp
 }
 
 /**
