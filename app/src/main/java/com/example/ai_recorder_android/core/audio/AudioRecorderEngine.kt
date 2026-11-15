@@ -78,6 +78,41 @@ class AudioRecorderEngine(
             }
             return sqrt(sum / count) / 32768.0
         }
+
+        /**
+         * 波形包络：把一帧小端 int16 PCM（16kHz mono）均分成 [bucketsPerFrame] 段，
+         * 逐段计算归一化 RMS（0.0~1.0，同 [computeRms] 标定），供 UI 波形绘制。
+         *
+         * 每帧 100ms × 每帧 [bucketsPerFrame] 根柱 ≈ 40 柱/秒（默认 4 桶），
+         * 纹理密度对齐语音备忘录类 App 的真波形观感。
+         * PCM 长度不足（含 0）时对应桶返回 0.0；与 [computeRms] 一样为纯函数，供引擎线程调用。
+         */
+        fun computeEnvelope(pcm: ByteArray, bucketsPerFrame: Int = 4): FloatArray {
+            require(bucketsPerFrame > 0) { "bucketsPerFrame 必须为正: $bucketsPerFrame" }
+            val samples = ShortArray(pcm.size / 2)
+            ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(samples)
+            val envelope = FloatArray(bucketsPerFrame)
+            if (samples.isEmpty()) return envelope
+            val bucketSize = samples.size / bucketsPerFrame
+            for (b in 0 until bucketsPerFrame) {
+                val start = b * bucketSize
+                // 尾桶吸收整除余数，保证样本无遗漏
+                val end = if (b == bucketsPerFrame - 1) samples.size else start + bucketSize
+                envelope[b] = computeRmsRange(samples, start, end).toFloat()
+            }
+            return envelope
+        }
+
+        /** [start, end) 区间归一化 RMS（int16 满量程标定）；区间为空返回 0.0。 */
+        private fun computeRmsRange(buffer: ShortArray, start: Int, end: Int): Double {
+            if (end <= start) return 0.0
+            var sum = 0.0
+            for (i in start until end) {
+                val v = buffer[i].toDouble()
+                sum += v * v
+            }
+            return sqrt(sum / (end - start)) / 32768.0
+        }
     }
 
     @Volatile

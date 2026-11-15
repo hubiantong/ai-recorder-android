@@ -27,10 +27,12 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.tooling.preview.PreviewScreenSizes
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.example.ai_recorder_android.data.repo.UserConfig
 import com.example.ai_recorder_android.data.repo.UserConfigRepository
 import com.example.ai_recorder_android.ui.screens.DetailScreen
@@ -38,10 +40,11 @@ import com.example.ai_recorder_android.ui.screens.FileUploadScreen
 import com.example.ai_recorder_android.ui.screens.HistoryScreen
 import com.example.ai_recorder_android.ui.screens.HomeScreen
 import com.example.ai_recorder_android.ui.screens.OnboardingScreen
+import com.example.ai_recorder_android.ui.screens.RecordingScreen
 import com.example.ai_recorder_android.ui.screens.SettingsScreen
 import com.example.ai_recorder_android.ui.theme.AirecorderandroidTheme
 
-/** 路由常量：底部导航三入口 + 无底部栏路由（onboarding/detail/file_upload 全屏）。 */
+/** 路由常量：底部导航三入口 + 无底部栏路由（onboarding/detail/file_upload/recording 全屏）。 */
 object Routes {
     const val HOME = "home"
     const val HISTORY = "history"
@@ -49,6 +52,16 @@ object Routes {
     const val SETTINGS = "settings"
     const val ONBOARDING = "onboarding"
     const val FILE_UPLOAD = "file_upload"
+
+    /**
+     * 录音页路由（无底部栏的专注界面，从首页「开始录音」进入）。
+     * autoStart=true：进入后自动请求麦克风权限并开始录音（首页 CTA 一键直达）。
+     */
+    const val RECORDING = "recording?autoStart={autoStart}"
+
+    /** 构造录音页导航地址（省略 autoStart 时取默认值 false）。 */
+    fun recordingRoute(autoStart: Boolean = false) =
+        if (autoStart) "recording?autoStart=true" else "recording"
 }
 
 /** 底部导航项（home / history / settings 三个主入口）。 */
@@ -166,8 +179,30 @@ fun AirecorderandroidApp(config: UserConfig? = null) {
         ) {
             composable(Routes.HOME) {
                 HomeScreen(
-                    onSettingsClick = { navController.navigate(Routes.SETTINGS) },
+                    onStartRecordingClick = {
+                        navController.navigate(Routes.recordingRoute(autoStart = true))
+                    },
+                    onOpenActiveRecordingClick = {
+                        navController.navigate(Routes.recordingRoute())
+                    },
+                    onRecordingClick = { id -> navController.navigate("${Routes.DETAIL}/$id") },
+                    onSeeAllHistoryClick = { navController.navigate(Routes.HISTORY) },
+                )
+            }
+            composable(
+                Routes.RECORDING,
+                arguments = listOf(
+                    navArgument("autoStart") {
+                        type = NavType.BoolType
+                        defaultValue = false
+                    },
+                ),
+            ) { entry ->
+                RecordingScreen(
                     onFileUploadClick = { navController.navigate(Routes.FILE_UPLOAD) },
+                    onSettingsClick = { navController.navigate(Routes.SETTINGS) },
+                    onBackClick = { navController.popBackStack() },
+                    autoStart = entry.arguments?.getBoolean("autoStart") ?: false,
                 )
             }
             composable(Routes.HISTORY) {

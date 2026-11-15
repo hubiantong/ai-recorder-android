@@ -1,5 +1,6 @@
 package com.example.ai_recorder_android.service
 
+import com.example.ai_recorder_android.core.audio.AudioRecorderEngine
 import com.example.ai_recorder_android.core.audio.RecordingAudioEngine
 import com.example.ai_recorder_android.core.audio.RecordingAudioEngineFactory
 import com.example.ai_recorder_android.core.audio.RecordingEngineEvents
@@ -168,8 +169,11 @@ class RecordingCoordinator(
     /** 累计暂停时长（毫秒）。 */
     val pausedDurationMs: Long get() = totalPausedMs
 
-    /** 音量电平监听（todo 19 接 UI 波形）；引擎线程回调。 */
+    /** 音量电平监听（引擎线程回调）；UI 波形已改走 [waveformListener]（PCM 包络），当前预留。 */
     var levelListener: ((Double) -> Unit)? = null
+
+    /** 波形包络监听（引擎线程回调）：每 PCM 帧均分 4 桶的归一化 RMS（见 [AudioRecorderEngine.computeEnvelope]），供 UI 波形绘制。 */
+    var waveformListener: ((FloatArray) -> Unit)? = null
 
     /** 录音中 16kHz PCM 帧监听（引擎线程回调，实时转写投递用；调用方保证非阻塞）。 */
     var pcmListener: ((ByteArray) -> Unit)? = null
@@ -428,6 +432,8 @@ class RecordingCoordinator(
 
     override fun onPcmFrame(pcm: ByteArray) {
         pcmListener?.invoke(pcm)
+        // 仅在有 UI 消费时才计算包络（离开录音页后录音+ASR 继续跑，避免每帧无谓解码）
+        waveformListener?.let { it(AudioRecorderEngine.computeEnvelope(pcm)) }
     }
 
     override fun onSegmentClosed(index: Int, file: File, durationMs: Long) {

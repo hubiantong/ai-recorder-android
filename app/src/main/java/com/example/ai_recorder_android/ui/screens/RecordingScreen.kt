@@ -8,29 +8,30 @@ import android.media.projection.MediaProjectionManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,8 +40,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -52,18 +56,22 @@ import com.example.ai_recorder_android.R
 import com.example.ai_recorder_android.core.audio.RecordingSessionConfig
 import com.example.ai_recorder_android.data.repo.UserConfig
 import com.example.ai_recorder_android.data.repo.UserConfigRepository
-import com.example.ai_recorder_android.ui.components.BrandVolumeBar
-import com.example.ai_recorder_android.ui.components.PulsingDot
-import com.example.ai_recorder_android.ui.theme.RecordingRed
 import com.example.ai_recorder_android.service.RecordingCoordinator
 import com.example.ai_recorder_android.service.RecordingPhase
 import com.example.ai_recorder_android.service.RecordingService
 import com.example.ai_recorder_android.service.RecordingSessionState
+import com.example.ai_recorder_android.ui.components.PulsingDot
+import com.example.ai_recorder_android.ui.components.WaveformView
+import com.example.ai_recorder_android.ui.theme.RecordingRed
+import com.example.ai_recorder_android.ui.theme.WarningAmber
 import java.io.File
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -74,9 +82,9 @@ import kotlinx.coroutines.launch
 data class PartialTranscript(val id: Long, val text: String)
 
 /**
- * 录音主页 ViewModel（todo 19，代码库首个 ViewModel）。
+ * 录音页 ViewModel（todo 19，代码库首个 ViewModel）。
  *
- * **职责边界**：只持有 UI 展示状态（音量/转写气泡/档位），**不实现录音逻辑**——
+ * **职责边界**：只持有 UI 展示状态（计时/波形/转写气泡/档位），**不实现录音逻辑**——
  * 实际录音由共享 [RecordingCoordinator]（App 单例）+ [RecordingService] 编排。
  *
  * **状态来源**：录音会话状态直接取自 [RecordingCoordinator.sessionState]（[sessionState]），
@@ -95,9 +103,13 @@ class RecordingViewModel(
     /** 录音会话真实状态（唯一来源：Coordinator，UI 不自行推断）。 */
     val sessionState: StateFlow<RecordingSessionState> = coordinator.sessionState
 
-    /** RMS 音量电平 0.0-1.0（Metis S2.3 降级版：音量条而非像素波形）。 */
-    private val _rmsLevel = MutableStateFlow(0f)
-    val rmsLevel: StateFlow<Float> = _rmsLevel.asStateFlow()
+    /** 波形历史（时间正序，末尾最新）：每帧 4 桶包络追加，滑窗 [WAVEFORM_MAX_BARS] 根 ≈ 4 秒。 */
+    private val _waveform = MutableStateFlow<List<Float>>(emptyList())
+    val waveform: StateFlow<List<Float>> = _waveform.asStateFlow()
+
+    /** 录音已过时长（毫秒，扣除暂停）：200ms 轮询 Coordinator 唯一真源，暂停期间自然冻结。 */
+    private val _elapsedMs = MutableStateFlow(0L)
+    val elapsedMs: StateFlow<Long> = _elapsedMs.asStateFlow()
 
     /** 实时转写 partial 气泡列表（realtime 档流式输出，todo 17 管线接线）。 */
     private val _partials = MutableStateFlow<List<PartialTranscript>>(emptyList())
@@ -116,9 +128,12 @@ class RecordingViewModel(
     // 依赖清单无 lifecycle-viewmodel-ktx（viewModelScope 不可用），自建 scope 随 ViewModel 销毁
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /** 计时轮询任务：会话活动期间运行，非活动取消并归零（见 [startElapsedTicker]/[stopElapsedTicker]）。 */
+    private var elapsedTicker: Job? = null
+
     init {
-        // 音量电平回流：共享 coordinator 引擎线程回调 → UI 音量条
-        coordinator.levelListener = { onLevel(it) }
+        // 波形回流：共享 coordinator 引擎线程回调 → 每帧 4 桶包络 → UI 波形
+        coordinator.waveformListener = { onWaveformFrame(it) }
         // 实时转写回流：RecordingService（realtime 档）→ 主线程 → 字幕气泡
         coordinator.transcriptListener = { partial, text ->
             if (partial) onPartialTranscript(text) else onSentenceTranscript(text)
@@ -129,6 +144,29 @@ class RecordingViewModel(
                 _tier.value = config.asrTier
             }
         }
+        // 计时轮询随会话真实状态启停（RECORDING/PAUSED 活动，其余归零清波形）
+        scope.launch {
+            coordinator.sessionState.collect { state ->
+                if (state.isActive) startElapsedTicker() else stopElapsedTicker()
+            }
+        }
+    }
+
+    private fun startElapsedTicker() {
+        if (elapsedTicker?.isActive == true) return
+        elapsedTicker = scope.launch {
+            while (true) {
+                _elapsedMs.value = coordinator.elapsedMs()
+                delay(200)
+            }
+        }
+    }
+
+    private fun stopElapsedTicker() {
+        elapsedTicker?.cancel()
+        elapsedTicker = null
+        _elapsedMs.value = 0L
+        _waveform.value = emptyList()
     }
 
     // ---------- 录音控制（只发命令；状态由 Coordinator 回推） ----------
@@ -150,7 +188,7 @@ class RecordingViewModel(
             if (phase != RecordingPhase.IDLE && phase != RecordingPhase.COMPLETED && phase != RecordingPhase.ERROR) return@launch
             val config = userConfigRepository.userConfig.first()
             _partials.value = emptyList()
-            _rmsLevel.value = 0f
+            _waveform.value = emptyList()
             val outputDir = File(context.filesDir, "recordings").apply { mkdirs() }
             val audioSource = if (config.meetingMode) {
                 RecordingSessionConfig.sanitizeSource(config.meetingAudioSource)
@@ -187,11 +225,11 @@ class RecordingViewModel(
         context.startService(RecordingService.stopIntent(context))
     }
 
-    // ---------- 外部事件入口（onLevel 已接线；转写回流已接线 realtime 档） ----------
+    // ---------- 外部事件入口（波形已接线；转写回流已接线 realtime 档） ----------
 
-    /** 引擎 RMS 电平回调（0.0-1.0，越界钳制；经 Coordinator.levelListener 回流）。 */
-    fun onLevel(rms: Double) {
-        _rmsLevel.value = rms.toFloat().coerceIn(0f, 1f)
+    /** 引擎波形包络回调（每帧 4 桶归一化 RMS）：追加历史并裁剪滑窗。 */
+    fun onWaveformFrame(bars: FloatArray) {
+        _waveform.value = (_waveform.value + bars.toList()).takeLast(WAVEFORM_MAX_BARS)
     }
 
     /**
@@ -214,7 +252,7 @@ class RecordingViewModel(
     }
 
     override fun onCleared() {
-        coordinator.levelListener = null
+        coordinator.waveformListener = null
         coordinator.transcriptListener = null
         scope.cancel()
         super.onCleared()
@@ -223,6 +261,9 @@ class RecordingViewModel(
     companion object {
         /** 「正在识别」气泡的固定 id（负数避免与定稿句 id 冲突）。 */
         private const val LIVE_PARTIAL_ID = -1L
+
+        /** 波形滑窗上限（根）：每 100ms 4 根 → 约 4 秒可视历史。 */
+        private const val WAVEFORM_MAX_BARS = 160
 
         /** 生产工厂：Context 装配共享 RecordingCoordinator（App 单例）+ UserConfigRepository。 */
         fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
@@ -239,10 +280,15 @@ class RecordingViewModel(
 }
 
 /**
- * 录音主页：音量指示条 + 录音控制 + 实时转写气泡 + 拍照/文件转写入口 + 档位/设置入口。
+ * 录音页（专注录音）：录音状态为页面主角——状态文案 + 脉冲点 + 大计时器 + 动态波形，
+ * 实时转写居中，圆形主控按钮（开始/暂停/继续/结束），拍照/文件转写收进次级区。
+ *
+ * 从首页「开始录音」进入的专注界面（无底部栏，返回回首页），不再是启动首页。
  *
  * @param onFileUploadClick 文件转写入口（跳转 Routes.FILE_UPLOAD）
  * @param onSettingsClick 设置入口（跳转 Routes.SETTINGS）
+ * @param onBackClick 返回入口（null 时无返回按钮，保持旧渲染）
+ * @param autoStart true：进入后自动请求麦克风权限并开始录音（首页 CTA 一键直达）
  */
 @Composable
 fun RecordingScreen(
@@ -250,9 +296,12 @@ fun RecordingScreen(
     onFileUploadClick: () -> Unit,
     onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
+    onBackClick: (() -> Unit)? = null,
+    autoStart: Boolean = false,
 ) {
     val session by viewModel.sessionState.collectAsState()
-    val rmsLevel by viewModel.rmsLevel.collectAsState()
+    val waveform by viewModel.waveform.collectAsState()
+    val elapsedMs by viewModel.elapsedMs.collectAsState()
     val partials by viewModel.partials.collectAsState()
     val tier by viewModel.tier.collectAsState()
 
@@ -305,6 +354,13 @@ fun RecordingScreen(
         }
     }
 
+    // 首页 CTA 一键直达：进入本页自动请求权限开始录音；会话已活动/忙碌（如从横幅返回）则跳过
+    LaunchedEffect(Unit) {
+        if (autoStart && !session.isActive && !session.isBusy) {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     // 拍照附件流程（todo 23）：相机 Intent → 保存附件 + 缩略图 + VLM 描述
     val photoManager = rememberPhotoAttachmentManager()
     val photoController = rememberPhotoCaptureController(photoManager)
@@ -314,11 +370,19 @@ fun RecordingScreen(
             .fillMaxSize()
             .padding(16.dp),
     ) {
-        // 顶栏：档位（点击进设置）+ 设置齿轮
+        // 顶栏：返回（从首页进入时）+ 档位（点击进设置）+ 设置齿轮
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            if (onBackClick != null) {
+                IconButton(onClick = onBackClick) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_arrow_back),
+                        contentDescription = "返回",
+                    )
+                }
+            }
             TierChip(tier = tier, onClick = onSettingsClick)
             Spacer(modifier = Modifier.weight(1f))
             IconButton(onClick = onSettingsClick) {
@@ -331,8 +395,12 @@ fun RecordingScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // 音量指示条（RMS 驱动，非像素波形）
-        VolumeIndicator(rmsLevel = rmsLevel)
+        // 页面主角：录音状态 + 大计时器 + 动态波形
+        RecordingHero(
+            session = session,
+            elapsedMs = elapsedMs,
+            waveform = waveform,
+        )
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -344,7 +412,7 @@ fun RecordingScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // 录音控制：开始/停止 + 暂停/继续（按 Coordinator 真实状态启停）
+        // 圆形主控：开始 / 暂停↔继续 + 结束（按 Coordinator 真实状态切换与启停）
         RecordingControls(
             session = session,
             onStartClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
@@ -353,10 +421,20 @@ fun RecordingScreen(
             onResumeClick = viewModel::onResumeClick,
         )
 
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // 次级区细分隔线：主控与辅助操作的视觉分界
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+        )
+
         Spacer(modifier = Modifier.height(8.dp))
 
         // 拍照（相机流程内建，仅录音中可用——对齐 Coordinator.addAttachment 需活动会话）
-        // 与文件转写（恒可用）并列的快捷入口行
+        // 与文件转写（恒可用）并列的紧凑次级入口行
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -364,49 +442,104 @@ fun RecordingScreen(
             FilledTonalButton(
                 onClick = { photoController.launch() },
                 enabled = session.isActive,
-                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(40.dp),
             ) {
-                Text("拍照")
+                Text("拍照", style = MaterialTheme.typography.bodyMedium)
             }
             FilledTonalButton(
                 onClick = onFileUploadClick,
-                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(40.dp),
             ) {
-                Text("文件转写")
+                Text("文件转写", style = MaterialTheme.typography.bodyMedium)
             }
         }
         PhotoCaptureResult(controller = photoController, manager = photoManager)
     }
 }
 
-/** 档位胶囊：展示当前 ASR tier，点击进入设置（tier 选择入口）。 */
+/**
+ * 页面主角：状态行（脉冲点 + 文案）+ 大计时器（tnum 等宽数字防跳动）+ 滚动波形。
+ *
+ * 状态配色：录音中=脉冲红点红字、已暂停=琥珀点暗字、其余灰字；
+ * 波形录音中走品牌渐变，暂停/空闲灰态平线（冻结的历史柱保留但变灰）。
+ */
 @Composable
-private fun TierChip(tier: String, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.secondaryContainer,
+private fun RecordingHero(
+    session: RecordingSessionState,
+    elapsedMs: Long,
+    waveform: List<Float>,
+) {
+    val isRecording = session.phase == RecordingPhase.RECORDING
+    val isPaused = session.phase == RecordingPhase.PAUSED
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (isRecording || isPaused) {
+                PulsingDot(color = if (isRecording) RecordingRed else WarningAmber)
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Text(
+                text = statusText(session.phase),
+                style = MaterialTheme.typography.labelLarge,
+                color = when {
+                    isRecording -> RecordingRed
+                    isPaused -> WarningAmber
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = "档位 · $tier",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            text = formatElapsed(elapsedMs),
+            style = MaterialTheme.typography.displayLarge.copy(
+                fontFeatureSettings = "tnum",
+                color = if (isPaused) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            ),
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        WaveformView(
+            bars = waveform,
+            active = isRecording,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(100.dp),
         )
     }
 }
 
-/** 音量指示条：品牌渐变电平条（RMS 0.0-1.0 驱动，平滑过渡）。 */
-@Composable
-private fun VolumeIndicator(rmsLevel: Float) {
-    Column {
-        Text(
-            text = "音量",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        BrandVolumeBar(level = rmsLevel, modifier = Modifier.fillMaxWidth())
+/** 录音阶段 → 用户可读状态文案（正在启动/保存对应 STARTING/STOPPING 过渡期）。 */
+private fun statusText(phase: RecordingPhase): String = when (phase) {
+    RecordingPhase.IDLE -> "准备就绪"
+    RecordingPhase.STARTING -> "正在启动…"
+    RecordingPhase.RECORDING -> "录音中"
+    RecordingPhase.PAUSED -> "已暂停"
+    RecordingPhase.STOPPING -> "正在保存…"
+    RecordingPhase.COMPLETED -> "录音已结束"
+    RecordingPhase.ERROR -> "录音失败，可重试"
+}
+
+/** 计时格式：不足 1 小时 MM:SS，满 1 小时 HH:MM:SS（Locale.US 固定拉丁数字）。 */
+private fun formatElapsed(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.US, "%02d:%02d", minutes, seconds)
     }
 }
 
@@ -453,11 +586,11 @@ private fun PartialTranscriptList(
 }
 
 /**
- * 录音控制按钮组：按 Coordinator 真实阶段启停。
+ * 录音主控：圆形大按钮 + 下方文字标签，按 Coordinator 真实阶段切换。
  *
- * 按钮层级（品牌规范）：开始录音=主色实心、停止=错误容器色、暂停/继续=描边次级。
- * STARTING/STOPPING 过渡期全部禁用（避免快速连点产生乱序命令）；
- * IDLE/COMPLETED/ERROR 可开始（失败可直接重试）；录音中显示脉冲红点指示。
+ * 会话活动：主圆钮「暂停 ↔ 继续」（72dp，主色）+「结束」圆钮（64dp，错误容器色）；
+ * 空闲/完成/失败：「开始录音」大圆钮（80dp，主色，失败可直接重试）；
+ * STARTING/STOPPING 过渡期全部禁用（避免快速连点产生乱序命令）。
  */
 @Composable
 private fun RecordingControls(
@@ -472,60 +605,107 @@ private fun RecordingControls(
     val canPause = session.phase == RecordingPhase.RECORDING
     val canResume = session.phase == RecordingPhase.PAUSED
 
-    AnimatedVisibility(visible = session.phase == RecordingPhase.RECORDING) {
+    if (session.isActive) {
         Row(
             modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(40.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
         ) {
-            PulsingDot()
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "录音中",
-                style = MaterialTheme.typography.labelMedium,
-                color = RecordingRed,
+            LabeledCircleButton(
+                iconRes = if (canPause) R.drawable.ic_pause else R.drawable.ic_play,
+                label = if (canPause) "暂停" else "继续",
+                enabled = canPause || canResume,
+                onClick = if (canPause) onPauseClick else onResumeClick,
+                size = 72.dp,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            )
+            LabeledCircleButton(
+                iconRes = R.drawable.ic_stop,
+                label = "结束",
+                enabled = canStop,
+                onClick = onStopClick,
+                size = 64.dp,
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            )
+        }
+    } else {
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            LabeledCircleButton(
+                iconRes = R.drawable.ic_mic,
+                label = "开始录音",
+                enabled = canStart,
+                onClick = onStartClick,
+                size = 80.dp,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
             )
         }
     }
-    Spacer(modifier = Modifier.height(8.dp))
+}
 
-    Row(modifier = Modifier.fillMaxWidth()) {
+/**
+ * 圆形主控按钮 + 下方文字标签。
+ * 无障碍语义由 icon 的 contentDescription 承载，下方可见标签仅供视觉（不重复聚焦）。
+ */
+@Composable
+private fun LabeledCircleButton(
+    iconRes: Int,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    size: Dp,
+    containerColor: Color,
+    contentColor: Color,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Button(
-            onClick = onStartClick,
-            enabled = canStart,
-            modifier = Modifier.weight(1f),
-        ) {
-            Text("开始录音")
-        }
-        Spacer(modifier = Modifier.width(8.dp))
-        Button(
-            onClick = onStopClick,
-            enabled = canStop,
-            modifier = Modifier.weight(1f),
+            onClick = onClick,
+            enabled = enabled,
+            shape = CircleShape,
             colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.errorContainer,
-                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                containerColor = containerColor,
+                contentColor = contentColor,
+                disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             ),
+            contentPadding = PaddingValues(0.dp),
+            modifier = Modifier.size(size),
         ) {
-            Text("停止")
+            Icon(
+                painter = painterResource(iconRes),
+                contentDescription = label,
+                modifier = Modifier.size(28.dp),
+            )
         }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // 可见标签纯视觉：无障碍语义已由按钮 icon 的 contentDescription 承载，避免 TalkBack 重复朗读
+            modifier = Modifier.clearAndSetSemantics { },
+        )
     }
-    Spacer(modifier = Modifier.height(8.dp))
-    Row(modifier = Modifier.fillMaxWidth()) {
-        OutlinedButton(
-            onClick = onPauseClick,
-            enabled = canPause,
-            modifier = Modifier.weight(1f),
-        ) {
-            Text("暂停")
-        }
-        Spacer(modifier = Modifier.width(8.dp))
-        OutlinedButton(
-            onClick = onResumeClick,
-            enabled = canResume,
-            modifier = Modifier.weight(1f),
-        ) {
-            Text("继续")
-        }
+}
+
+/** 档位胶囊：展示当前 ASR tier，点击进入设置（tier 选择入口）。 */
+@Composable
+private fun TierChip(tier: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+    ) {
+        Text(
+            text = "档位 · $tier",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        )
     }
 }
