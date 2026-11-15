@@ -7,7 +7,7 @@ import com.example.ai_recorder_android.service.RecordingSessionState
 import com.example.ai_recorder_android.ui.screens.HomeViewModel
 import com.example.ai_recorder_android.ui.screens.deriveHomeUiState
 import com.example.ai_recorder_android.ui.screens.homeGreeting
-import com.example.ai_recorder_android.ui.screens.notePreview
+import com.example.ai_recorder_android.ui.components.notePreview
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull

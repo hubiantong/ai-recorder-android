@@ -1,17 +1,13 @@
 package com.example.ai_recorder_android.ui.screens
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
@@ -21,6 +17,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -31,9 +28,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
@@ -44,9 +40,9 @@ import com.example.ai_recorder_android.data.db.RecordingDao
 import com.example.ai_recorder_android.data.db.RecordingEntity
 import com.example.ai_recorder_android.data.db.RecordingsByDay
 import com.example.ai_recorder_android.ui.components.EmptyStateView
-import com.example.ai_recorder_android.ui.components.RecordingStatusChip
-import com.example.ai_recorder_android.ui.components.RecordingTypeChip
-import com.example.ai_recorder_android.ui.components.SectionCard
+import com.example.ai_recorder_android.ui.components.RecordingListItem
+import com.example.ai_recorder_android.ui.theme.IconSize
+import com.example.ai_recorder_android.ui.theme.Spacing
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -177,10 +173,11 @@ fun HistoryScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = Spacing.page, vertical = Spacing.sm),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
         ) {
+            // 品牌搜索框：胶囊形 + surfaceContainer 容器、无下划线指示条
             TextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
@@ -188,6 +185,14 @@ fun HistoryScreen(
                 placeholder = { Text("搜索标题或转写内容") },
                 leadingIcon = { Icon(painter = painterResource(R.drawable.ic_search), contentDescription = null) },
                 singleLine = true,
+                shape = MaterialTheme.shapes.large,
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent,
+                ),
             )
             // 文件转写导入入口（上传本地音频 → 转写 → 落库为录音记录）
             IconButton(onClick = onFileUploadClick) {
@@ -215,7 +220,7 @@ fun HistoryScreen(
     }
 }
 
-/** 按天分组列表：组头（今天/昨天/日期）+ 组内记录项。 */
+/** 按天分组列表：组头（今天/昨天/日期）+ 组内记录项；页边距统一由 contentPadding 承担。 */
 @Composable
 private fun RecordingList(
     groups: List<RecordingsByDay>,
@@ -224,14 +229,19 @@ private fun RecordingList(
 ) {
     LazyColumn(
         modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 16.dp),
+        contentPadding = PaddingValues(
+            start = Spacing.page,
+            end = Spacing.page,
+            bottom = Spacing.lg,
+        ),
+        verticalArrangement = Arrangement.spacedBy(Spacing.sm),
     ) {
         groups.forEach { group ->
             item(key = "header_${group.day}") {
                 HistorySectionHeader(day = group.day)
             }
             items(group.recordings, key = { it.id }) { recording ->
-                RecordingItem(
+                RecordingListItem(
                     recording = recording,
                     onClick = { onRecordingClick(recording.id) },
                 )
@@ -247,75 +257,8 @@ private fun HistorySectionHeader(day: String, modifier: Modifier = Modifier) {
         text = dayLabel(day),
         style = MaterialTheme.typography.titleSmall,
         color = MaterialTheme.colorScheme.primary,
-        modifier = modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = modifier.padding(vertical = Spacing.xs),
     )
-}
-
-/**
- * 单条录音卡片：标题 + 类型/状态 chip + 日期 · 时长 + AI 摘要预览。
- * - 处理中（COMPLETED 且 summary 未生成）：「AI 笔记生成中…」；
- * - 失败（FAILED）：errorMessage 红字；
- * - 已完成：摘要两行省略预览。
- */
-@Composable
-private fun RecordingItem(
-    recording: RecordingEntity,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    SectionCard(
-        contentPadding = PaddingValues(12.dp),
-        modifier = modifier
-            .padding(horizontal = 16.dp, vertical = 4.dp)
-            .clickable(onClick = onClick),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = recordingTitle(recording),
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            RecordingTypeChip(meetingMode = recording.meetingMode)
-            Spacer(modifier = Modifier.width(4.dp))
-            RecordingStatusChip(
-                status = recording.status,
-                hasNote = recording.summary != null,
-            )
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = recordingMeta(recording),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        when {
-            recording.status == com.example.ai_recorder_android.data.db.RecordingStatus.FAILED -> Text(
-                text = recording.errorMessage ?: "录音处理失败",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            recording.summary != null -> Text(
-                text = recording.summary,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            else -> Text(
-                text = "AI 笔记生成中…",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.tertiary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
 }
 
 /** 加载中：居中转圈。 */
@@ -340,7 +283,7 @@ private fun EmptyState(modifier: Modifier = Modifier) {
             Icon(
                 painter = painterResource(R.drawable.ic_history),
                 contentDescription = null,
-                modifier = Modifier.size(56.dp),
+                modifier = Modifier.size(IconSize.xl),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         },
@@ -358,7 +301,7 @@ private fun SearchEmptyState(query: String, modifier: Modifier = Modifier) {
             Icon(
                 painter = painterResource(R.drawable.ic_search),
                 contentDescription = null,
-                modifier = Modifier.size(56.dp),
+                modifier = Modifier.size(IconSize.xl),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         },
@@ -376,7 +319,7 @@ private fun ErrorState(message: String, onRetry: () -> Unit, modifier: Modifier 
             Icon(
                 painter = painterResource(R.drawable.ic_history),
                 contentDescription = null,
-                modifier = Modifier.size(56.dp),
+                modifier = Modifier.size(IconSize.xl),
                 tint = MaterialTheme.colorScheme.error,
             )
         },
@@ -401,42 +344,5 @@ internal fun dayLabel(day: String, today: LocalDate = LocalDate.now()): String {
         today -> "今天"
         today.minusDays(1) -> "昨天"
         else -> date.format(DateTimeFormatter.ofPattern("yyyy年M月d日", Locale.CHINA))
-    }
-}
-
-/** 列表标题：title 非空白用 title，否则默认 "录音 yyyy-MM-dd HH:mm:ss"（对齐 PC `_format_title`）。 */
-internal fun recordingTitle(
-    recording: RecordingEntity,
-    zoneId: ZoneId = ZoneId.systemDefault(),
-): String {
-    recording.title?.takeIf { it.isNotBlank() }?.let { return it }
-    return "录音 " + Instant.ofEpochMilli(recording.createdAt)
-        .atZone(zoneId)
-        .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.CHINA))
-}
-
-/** 副标题：MM-dd HH:mm · mm:ss（时长缺失时省略，对齐 PC `_format_meta`）。 */
-internal fun recordingMeta(
-    recording: RecordingEntity,
-    zoneId: ZoneId = ZoneId.systemDefault(),
-): String {
-    val date = Instant.ofEpochMilli(recording.createdAt)
-        .atZone(zoneId)
-        .format(DateTimeFormatter.ofPattern("MM-dd HH:mm", Locale.CHINA))
-    val duration = recording.audioDurationSeconds?.let { formatDuration(it) }
-    return if (duration != null) "$date · $duration" else date
-}
-
-/** 时长格式化：mm:ss；≥1 小时显示 h:mm:ss；null 显示 00:00。 */
-internal fun formatDuration(seconds: Double?): String {
-    if (seconds == null) return "00:00"
-    val total = seconds.toLong().coerceAtLeast(0L)
-    val hours = total / 3600
-    val minutes = (total % 3600) / 60
-    val secs = total % 60
-    return if (hours > 0) {
-        "%d:%02d:%02d".format(hours, minutes, secs)
-    } else {
-        "%02d:%02d".format(minutes, secs)
     }
 }

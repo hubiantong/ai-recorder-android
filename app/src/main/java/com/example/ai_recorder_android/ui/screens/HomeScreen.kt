@@ -3,7 +3,6 @@ package com.example.ai_recorder_android.ui.screens
 import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,7 +17,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -29,11 +27,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -50,25 +45,23 @@ import com.example.ai_recorder_android.data.db.RecordingEntity
 import com.example.ai_recorder_android.data.db.RecordingStatus
 import com.example.ai_recorder_android.service.RecordingCoordinator
 import com.example.ai_recorder_android.service.RecordingSessionState
+import com.example.ai_recorder_android.ui.components.CardEmphasis
 import com.example.ai_recorder_android.ui.components.EmptyStateView
+import com.example.ai_recorder_android.ui.components.GradientPrimaryButton
 import com.example.ai_recorder_android.ui.components.ProcessingIndicator
 import com.example.ai_recorder_android.ui.components.PulsingDot
-import com.example.ai_recorder_android.ui.components.RecordingStatusChip
-import com.example.ai_recorder_android.ui.components.RecordingTypeChip
+import com.example.ai_recorder_android.ui.components.RecordingListItem
 import com.example.ai_recorder_android.ui.components.SectionCard
 import com.example.ai_recorder_android.ui.components.SectionTitle
-import com.example.ai_recorder_android.ui.theme.GradientAccentEnd
-import com.example.ai_recorder_android.ui.theme.GradientAccentStart
+import com.example.ai_recorder_android.ui.theme.IconSize
+import com.example.ai_recorder_android.ui.theme.LocalBrandSemanticColors
+import com.example.ai_recorder_android.ui.theme.Spacing
 import java.time.LocalTime
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-
-/** 品牌渐变（主 CTA / 品牌圆点共用，水平蓝→青）。 */
-private val BrandGradientBrush =
-    Brush.horizontalGradient(listOf(GradientAccentStart, GradientAccentEnd))
 
 /**
  * 首页 UI 状态：工作台三问的直接回答——最近记录（[recentRecordings]）、
@@ -167,17 +160,6 @@ internal fun homeGreeting(hour: Int): String = when (hour) {
     else -> "晚上好"
 }
 
-/** 笔记预览（可 JVM 单测）：跳过 markdown `#` 标题行与空行，取首个内容行，避免预览出现标记符号。 */
-internal fun notePreview(summary: String?): String? {
-    if (summary.isNullOrBlank()) return null
-    return summary.lines()
-        .firstOrNull { line ->
-            val trimmed = line.trim()
-            trimmed.isNotEmpty() && !trimmed.startsWith("#")
-        }
-        ?.trim()
-}
-
 /**
  * 首页：AI 录音笔记工作台（品牌问候 + 快速开始 + 最近 AI 笔记 + 最近录音及处理状态）。
  *
@@ -204,8 +186,13 @@ fun HomeScreen(
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(
+            start = Spacing.page,
+            end = Spacing.page,
+            top = Spacing.sm,
+            bottom = Spacing.lg,
+        ),
+        verticalArrangement = Arrangement.spacedBy(Spacing.sectionGap),
     ) {
         // 品牌标识 + 简洁问候
         item(key = "header") {
@@ -221,7 +208,11 @@ fun HomeScreen(
 
         // 主 CTA：开始录音
         item(key = "cta") {
-            StartRecordingButton(onClick = onStartRecordingClick)
+            GradientPrimaryButton(
+                text = "开始录音",
+                iconRes = R.drawable.ic_mic,
+                onClick = onStartRecordingClick,
+            )
         }
 
         // 全局处理中指示（各条目状态另有 chip 体现）
@@ -237,9 +228,10 @@ fun HomeScreen(
                 SectionTitle(text = "最近 AI 笔记")
             }
             items(uiState.recentNotes, key = { "note_${it.id}" }) { recording ->
-                NoteCard(
+                RecordingListItem(
                     recording = recording,
                     onClick = { onRecordingClick(recording.id) },
+                    showTypeChip = false,
                 )
             }
         }
@@ -255,9 +247,11 @@ fun HomeScreen(
                 }
             }
             items(uiState.recentRecordings, key = { "rec_${it.id}" }) { recording ->
-                RecordingCard(
+                RecordingListItem(
                     recording = recording,
                     onClick = { onRecordingClick(recording.id) },
+                    // 笔记预览由上方「最近 AI 笔记」承担，不重复展示
+                    showSummaryPreview = false,
                 )
             }
         } else if (!uiState.isLoading) {
@@ -269,7 +263,7 @@ fun HomeScreen(
                         Icon(
                             painter = painterResource(R.drawable.ic_mic),
                             contentDescription = null,
-                            modifier = Modifier.size(56.dp),
+                            modifier = Modifier.size(IconSize.xl),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     },
@@ -288,22 +282,22 @@ private fun HeaderSection(greeting: String, modifier: Modifier = Modifier) {
                 modifier = Modifier
                     .size(10.dp)
                     .clip(CircleShape)
-                    .background(BrandGradientBrush),
+                    .background(LocalBrandSemanticColors.current.accentGradientBrush),
             )
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(Spacing.sm))
             Text(
                 text = "AI录音",
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
             )
         }
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(Spacing.lg))
         Text(
             text = greeting,
             style = MaterialTheme.typography.headlineMedium,
             color = MaterialTheme.colorScheme.onSurface,
         )
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(Spacing.xs))
         Text(
             text = "开始一段新录音，或回顾最近的 AI 笔记",
             style = MaterialTheme.typography.bodyMedium,
@@ -312,16 +306,18 @@ private fun HeaderSection(greeting: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** 「录音进行中」横幅：脉冲红点 + 点按返回录音页。 */
+/** 「录音进行中」横幅：脉冲红点 + 点按返回录音页（强调层级卡，含按压反馈）。 */
 @Composable
 private fun ActiveRecordingBanner(onClick: () -> Unit, modifier: Modifier = Modifier) {
     SectionCard(
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-        modifier = modifier.clickable(onClick = onClick),
+        contentPadding = PaddingValues(horizontal = Spacing.cardPad, vertical = Spacing.md),
+        onClick = onClick,
+        emphasis = CardEmphasis.High,
+        modifier = modifier,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             PulsingDot()
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(Spacing.sm))
             Text(
                 text = "录音进行中",
                 style = MaterialTheme.typography.titleSmall,
@@ -332,132 +328,6 @@ private fun ActiveRecordingBanner(onClick: () -> Unit, modifier: Modifier = Modi
                 text = "点按继续",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary,
-            )
-        }
-    }
-}
-
-/** 主 CTA：品牌渐变胶囊按钮（蓝→青）+ 麦克风图标，全屏宽醒目入口。 */
-@Composable
-private fun StartRecordingButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(56.dp)
-            .clip(RoundedCornerShape(50))
-            .background(BrandGradientBrush)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                painter = painterResource(R.drawable.ic_mic),
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(20.dp),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "开始录音",
-                style = MaterialTheme.typography.titleMedium,
-                color = Color.White,
-            )
-        }
-    }
-}
-
-/**
- * AI 笔记卡片：标题 + 日期时长 + 摘要两行预览（`#` 标题行不进预览）。
- * 点击 → 详情页查看完整笔记。
- */
-@Composable
-private fun NoteCard(
-    recording: RecordingEntity,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    SectionCard(
-        contentPadding = PaddingValues(12.dp),
-        modifier = modifier.clickable(onClick = onClick),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = recordingTitle(recording),
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = recordingMeta(recording),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = notePreview(recording.summary) ?: "点击查看完整笔记",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-/**
- * 最近录音卡片：标题 + 类型/状态 chip + 日期时长。
- * - 失败（FAILED）：errorMessage 红字；
- * - 笔记未生成：「AI 笔记生成中…」（已完成的预览见上方笔记区，不重复展示）。
- */
-@Composable
-private fun RecordingCard(
-    recording: RecordingEntity,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    SectionCard(
-        contentPadding = PaddingValues(12.dp),
-        modifier = modifier.clickable(onClick = onClick),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = recordingTitle(recording),
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            RecordingTypeChip(meetingMode = recording.meetingMode)
-            Spacer(modifier = Modifier.width(4.dp))
-            RecordingStatusChip(
-                status = recording.status,
-                hasNote = recording.summary != null,
-            )
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = recordingMeta(recording),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        when {
-            recording.status == RecordingStatus.FAILED -> Text(
-                text = recording.errorMessage ?: "录音处理失败",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            // 笔记未生成（含 COMPLETED 后转写完成、笔记仍在生成的窗口）：处理中提示
-            recording.summary == null -> Text(
-                text = "AI 笔记生成中…",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.tertiary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
             )
         }
     }

@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.media.MediaPlayer
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -29,13 +28,11 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -45,6 +42,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,16 +55,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.ColorPainter
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -91,11 +87,16 @@ import com.example.ai_recorder_android.data.db.RecordingWithRelations
 import com.example.ai_recorder_android.data.db.TranscriptChunkEntity
 import com.example.ai_recorder_android.data.storage.StorageService
 import com.example.ai_recorder_android.service.transcription.PostProcessingScheduler
+import com.example.ai_recorder_android.ui.components.EmptyStateView
 import com.example.ai_recorder_android.ui.components.ProcessingIndicator
+import com.example.ai_recorder_android.ui.components.formatDuration
 import com.example.ai_recorder_android.ui.components.RecordingStatusChip
 import com.example.ai_recorder_android.ui.components.RecordingTypeChip
 import com.example.ai_recorder_android.ui.components.SectionCard
 import com.example.ai_recorder_android.ui.components.SectionTitle
+import com.example.ai_recorder_android.ui.theme.IconSize
+import com.example.ai_recorder_android.ui.theme.TimestampStyle
+import com.example.ai_recorder_android.ui.theme.tabularNums
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -298,8 +299,12 @@ fun DetailScreen(
 
     val clipboard = LocalClipboardManager.current
 
+    // 品牌顶栏：常态与页面背景同色（沉浸），滚动后浮出 surfaceContainer 层级
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     Scaffold(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
                 title = {
@@ -314,6 +319,11 @@ fun DetailScreen(
                         Icon(painterResource(R.drawable.ic_arrow_back), contentDescription = "返回")
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+                scrollBehavior = scrollBehavior,
             )
         },
     ) { innerPadding ->
@@ -325,7 +335,18 @@ fun DetailScreen(
         ) {
             when {
                 state.loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                data == null -> EmptyState(state.error, Modifier.align(Alignment.Center))
+                data == null -> EmptyStateView(
+                    title = state.error ?: "暂无数据",
+                    icon = {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_history),
+                            contentDescription = null,
+                            modifier = Modifier.size(IconSize.xl),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    modifier = Modifier.align(Alignment.Center),
+                )
                 else -> DetailContent(
                     data = data,
                     storage = storage,
@@ -569,7 +590,7 @@ private fun RecordingMeta(data: RecordingWithRelations, onEditTitle: () -> Unit,
                 rec.audioDurationSeconds?.let { append("  ·  ${formatDuration(it)}") }
                 if (rec.meetingMode) append("  ·  会议模式")
             },
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodySmall.tabularNums(),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(8.dp))
@@ -681,7 +702,7 @@ private fun AudioPlayerSection(
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onTogglePlay, enabled = playerReady) {
                 if (isPlaying) {
-                    PauseIcon()
+                    Icon(painterResource(R.drawable.ic_pause), contentDescription = "暂停")
                 } else {
                     Icon(painterResource(R.drawable.ic_play), contentDescription = "播放")
                 }
@@ -703,23 +724,11 @@ private fun AudioPlayerSection(
                 )
                 Text(
                     text = "${formatMs(positionMs)} / ${formatMs(durationMs)}",
-                    style = com.example.ai_recorder_android.ui.theme.TimestampStyle,
+                    style = TimestampStyle,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
-    }
-}
-
-/** 暂停图标（material-icons-core 无 Pause，用 Canvas 双竖条绘制）。 */
-@Composable
-private fun PauseIcon(modifier: Modifier = Modifier) {
-    val color = LocalContentColor.current
-    Canvas(modifier.size(24.dp)) {
-        val w = size.width
-        val h = size.height
-        drawRect(color, topLeft = Offset(w * 0.28f, h * 0.2f), size = Size(w * 0.18f, h * 0.6f))
-        drawRect(color, topLeft = Offset(w * 0.54f, h * 0.2f), size = Size(w * 0.18f, h * 0.6f))
     }
 }
 
@@ -751,8 +760,7 @@ private fun TranscriptBubble(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = chunk.speakerName ?: "转写",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.labelLarge,
                 )
             }
             Text(
@@ -773,8 +781,7 @@ private fun FusionNoteSection(summary: String, modifier: Modifier = Modifier) {
             when (block) {
                 is NoteBlock.Heading -> Text(
                     text = block.text,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(top = 6.dp),
                 )
@@ -896,21 +903,6 @@ private fun FullScreenImageViewer(
     }
 }
 
-/** 空态/错误态。 */
-@Composable
-private fun EmptyState(message: String?, modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier.padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(
-            text = message ?: "暂无数据",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
 // ---------- 纯函数工具 ----------
 
 /** 转写时间段：m:ss 或 m:ss–m:ss（对齐 PC `_fmt_time`）。 */
@@ -925,12 +917,6 @@ private fun formatTime(start: Double?, end: Double?): String {
 /** 播放器毫秒 → m:ss。 */
 private fun formatMs(ms: Long): String {
     val total = (ms / 1000).coerceAtLeast(0)
-    return "%d:%02d".format(total / 60, total % 60)
-}
-
-/** 时长秒数 → m:ss。 */
-private fun formatDuration(seconds: Double): String {
-    val total = seconds.toInt().coerceAtLeast(0)
     return "%d:%02d".format(total / 60, total % 60)
 }
 

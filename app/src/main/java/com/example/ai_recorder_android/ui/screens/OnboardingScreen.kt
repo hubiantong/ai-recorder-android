@@ -9,8 +9,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -19,7 +17,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import com.example.ai_recorder_android.ui.components.GradientPrimaryButton
+import com.example.ai_recorder_android.ui.components.SectionCard
+import com.example.ai_recorder_android.ui.theme.Spacing
 
 /**
  * 首启引导页：首次启动选择转写档位（凭证内置，无运行期密钥输入，Metis B1.3），
@@ -40,7 +40,7 @@ fun OnboardingScreen(onComplete: () -> Unit, modifier: Modifier = Modifier) {
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(24.dp),
+            .padding(Spacing.page),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
@@ -51,7 +51,7 @@ fun OnboardingScreen(onComplete: () -> Unit, modifier: Modifier = Modifier) {
             text = "选择转写模型档位即可开始使用。凭证已内置，无需手动配置。",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 8.dp, bottom = 24.dp),
+            modifier = Modifier.padding(top = Spacing.sm, bottom = Spacing.xl),
         )
 
         if (!config.onboardingDone) {
@@ -62,33 +62,33 @@ fun OnboardingScreen(onComplete: () -> Unit, modifier: Modifier = Modifier) {
                 onSelect = viewModel::setAsrTier,
             )
             TierDescription(config.asrTier)
-            Button(
+            GradientPrimaryButton(
+                text = "开始使用",
                 onClick = {
                     // 确保所选 tier 已持久化，再标记引导完成
                     viewModel.setAsrTier(config.asrTier)
                     viewModel.setOnboardingDone(true)
                     onComplete()
                 },
-                modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-            ) {
-                Text("开始使用")
-            }
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = Spacing.lg),
+            )
         } else {
             Text(
                 text = "配置已完成",
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(bottom = 16.dp),
+                modifier = Modifier.padding(bottom = Spacing.lg),
             )
-            Button(
+            GradientPrimaryButton(
+                text = "完成",
                 onClick = onComplete,
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("完成")
-            }
+            )
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(Spacing.xl))
         ReadOnlyConfigCard(tierId = config.asrTier)
     }
 }
@@ -96,20 +96,18 @@ fun OnboardingScreen(onComplete: () -> Unit, modifier: Modifier = Modifier) {
 /** 只读配置展示：当前档位 + 固定 VLM/LLM（对齐 PC settings_dialog 只读区）。 */
 @Composable
 private fun ReadOnlyConfigCard(tierId: String, modifier: Modifier = Modifier) {
-    Card(modifier = modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "当前配置（只读）",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            ConfigRow(label = "转写档位", value = tierLabel(tierId))
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-            ConfigRow(label = "图文描述 VLM", value = "阿里云百炼 Qwen-VL-Max（已内置）")
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-            ConfigRow(label = "文本整理 LLM", value = "DeepSeek deepseek-v4-flash（已内置）")
-        }
+    SectionCard(modifier = modifier) {
+        Text(
+            text = "当前配置（只读）",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(Spacing.sm))
+        ConfigRow(label = "转写档位", value = tierLabel(tierId))
+        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.sm))
+        ConfigRow(label = "图文描述 VLM", value = "阿里云百炼 Qwen-VL-Max（已内置）")
+        HorizontalDivider(modifier = Modifier.padding(vertical = Spacing.sm))
+        ConfigRow(label = "文本整理 LLM", value = "DeepSeek deepseek-v4-flash（已内置）")
     }
 }
 
@@ -120,7 +118,7 @@ private fun ConfigRow(label: String, value: String, modifier: Modifier = Modifie
             text = label,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(end = 16.dp),
+            modifier = Modifier.padding(end = Spacing.lg),
         )
         Text(
             text = value,

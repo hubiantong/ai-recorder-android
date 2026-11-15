@@ -12,8 +12,8 @@ import com.example.ai_recorder_android.data.db.AudioSource
 import com.example.ai_recorder_android.data.db.RecordingStatus
 
 /**
- * 品牌胶囊 chip：统一 TierChip/StatusChip 的复制粘贴样式。
- * pill 形（50% 圆角）+ 着色容器 + labelMedium。
+ * 品牌胶囊 chip：全 App 唯一的 chip 体系（状态/类型/档位共用）。
+ * pill 形（50% 圆角）+ 着色容器 + labelMedium；[onClick] 可选（如录音页档位入口）。
  */
 @Composable
 fun BrandChip(
@@ -21,18 +21,25 @@ fun BrandChip(
     container: Color,
     content: Color,
     modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
 ) {
-    Surface(
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(50),
-        color = container,
-        modifier = modifier,
-    ) {
+    val shape = androidx.compose.foundation.shape.RoundedCornerShape(50)
+    val label: @Composable () -> Unit = {
         Text(
             text = text,
             style = MaterialTheme.typography.labelMedium,
             color = content,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
         )
+    }
+    if (onClick != null) {
+        Surface(onClick = onClick, shape = shape, color = container, modifier = modifier) {
+            label()
+        }
+    } else {
+        Surface(shape = shape, color = container, modifier = modifier) {
+            label()
+        }
     }
 }
 

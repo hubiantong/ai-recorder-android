@@ -24,10 +24,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,11 +36,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -60,10 +53,13 @@ import com.example.ai_recorder_android.service.RecordingCoordinator
 import com.example.ai_recorder_android.service.RecordingPhase
 import com.example.ai_recorder_android.service.RecordingService
 import com.example.ai_recorder_android.service.RecordingSessionState
+import com.example.ai_recorder_android.ui.components.BrandChip
+import com.example.ai_recorder_android.ui.components.LabeledCircleButton
 import com.example.ai_recorder_android.ui.components.PulsingDot
 import com.example.ai_recorder_android.ui.components.WaveformView
-import com.example.ai_recorder_android.ui.theme.RecordingRed
-import com.example.ai_recorder_android.ui.theme.WarningAmber
+import com.example.ai_recorder_android.ui.theme.LocalBrandSemanticColors
+import com.example.ai_recorder_android.ui.theme.Spacing
+import com.example.ai_recorder_android.ui.theme.tabularNums
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
@@ -368,7 +364,7 @@ fun RecordingScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .padding(Spacing.page),
     ) {
         // 顶栏：返回（从首页进入时）+ 档位（点击进设置）+ 设置齿轮
         Row(
@@ -383,7 +379,12 @@ fun RecordingScreen(
                     )
                 }
             }
-            TierChip(tier = tier, onClick = onSettingsClick)
+            BrandChip(
+                text = "档位 · $tier",
+                container = MaterialTheme.colorScheme.secondaryContainer,
+                content = MaterialTheme.colorScheme.onSecondaryContainer,
+                onClick = onSettingsClick,
+            )
             Spacer(modifier = Modifier.weight(1f))
             IconButton(onClick = onSettingsClick) {
                 Icon(
@@ -393,7 +394,7 @@ fun RecordingScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(Spacing.lg))
 
         // 页面主角：录音状态 + 大计时器 + 动态波形
         RecordingHero(
@@ -410,7 +411,7 @@ fun RecordingScreen(
             modifier = Modifier.weight(1f),
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(Spacing.lg))
 
         // 圆形主控：开始 / 暂停↔继续 + 结束（按 Coordinator 真实状态切换与启停）
         RecordingControls(
@@ -421,7 +422,7 @@ fun RecordingScreen(
             onResumeClick = viewModel::onResumeClick,
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(Spacing.md))
 
         // 次级区细分隔线：主控与辅助操作的视觉分界
         Box(
@@ -431,18 +432,18 @@ fun RecordingScreen(
                 .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(Spacing.sm))
 
         // 拍照（相机流程内建，仅录音中可用——对齐 Coordinator.addAttachment 需活动会话）
         // 与文件转写（恒可用）并列的紧凑次级入口行
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
         ) {
             FilledTonalButton(
                 onClick = { photoController.launch() },
                 enabled = session.isActive,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.xs),
                 modifier = Modifier
                     .weight(1f)
                     .height(40.dp),
@@ -451,7 +452,7 @@ fun RecordingScreen(
             }
             FilledTonalButton(
                 onClick = onFileUploadClick,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = Spacing.md, vertical = Spacing.xs),
                 modifier = Modifier
                     .weight(1f)
                     .height(40.dp),
@@ -477,30 +478,30 @@ private fun RecordingHero(
 ) {
     val isRecording = session.phase == RecordingPhase.RECORDING
     val isPaused = session.phase == RecordingPhase.PAUSED
+    val semantic = LocalBrandSemanticColors.current
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (isRecording || isPaused) {
-                PulsingDot(color = if (isRecording) RecordingRed else WarningAmber)
-                Spacer(modifier = Modifier.width(8.dp))
+                PulsingDot(color = if (isRecording) semantic.recording else semantic.warning)
+                Spacer(modifier = Modifier.width(Spacing.sm))
             }
             Text(
                 text = statusText(session.phase),
                 style = MaterialTheme.typography.labelLarge,
                 color = when {
-                    isRecording -> RecordingRed
-                    isPaused -> WarningAmber
+                    isRecording -> semantic.recording
+                    isPaused -> semantic.warning
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
         }
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(Spacing.md))
         Text(
             text = formatElapsed(elapsedMs),
-            style = MaterialTheme.typography.displayLarge.copy(
-                fontFeatureSettings = "tnum",
+            style = MaterialTheme.typography.displayLarge.tabularNums().copy(
                 color = if (isPaused) {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 } else {
@@ -508,7 +509,7 @@ private fun RecordingHero(
                 },
             ),
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(Spacing.lg))
         WaveformView(
             bars = waveform,
             active = isRecording,
@@ -645,67 +646,5 @@ private fun RecordingControls(
                 contentColor = MaterialTheme.colorScheme.onPrimary,
             )
         }
-    }
-}
-
-/**
- * 圆形主控按钮 + 下方文字标签。
- * 无障碍语义由 icon 的 contentDescription 承载，下方可见标签仅供视觉（不重复聚焦）。
- */
-@Composable
-private fun LabeledCircleButton(
-    iconRes: Int,
-    label: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    size: Dp,
-    containerColor: Color,
-    contentColor: Color,
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Button(
-            onClick = onClick,
-            enabled = enabled,
-            shape = CircleShape,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = containerColor,
-                contentColor = contentColor,
-                disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            ),
-            contentPadding = PaddingValues(0.dp),
-            modifier = Modifier.size(size),
-        ) {
-            Icon(
-                painter = painterResource(iconRes),
-                contentDescription = label,
-                modifier = Modifier.size(28.dp),
-            )
-        }
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            // 可见标签纯视觉：无障碍语义已由按钮 icon 的 contentDescription 承载，避免 TalkBack 重复朗读
-            modifier = Modifier.clearAndSetSemantics { },
-        )
-    }
-}
-
-/** 档位胶囊：展示当前 ASR tier，点击进入设置（tier 选择入口）。 */
-@Composable
-private fun TierChip(tier: String, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-    ) {
-        Text(
-            text = "档位 · $tier",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-        )
     }
 }

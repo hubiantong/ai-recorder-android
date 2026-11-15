@@ -10,8 +10,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.unit.dp
-import com.example.ai_recorder_android.ui.theme.GradientAccentEnd
-import com.example.ai_recorder_android.ui.theme.GradientAccentStart
+import com.example.ai_recorder_android.ui.theme.LocalBrandSemanticColors
 
 /** 可视容量（柱位固定，历史不足时右对齐、超出时只画最新 160 根）。 */
 private const val BAR_CAPACITY = 160
@@ -33,6 +32,8 @@ fun WaveformView(
     active: Boolean = true,
 ) {
     val inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+    val accentStart = LocalBrandSemanticColors.current.accentGradientStart
+    val accentEnd = LocalBrandSemanticColors.current.accentGradientEnd
     Canvas(modifier = modifier) {
         val slot = size.width / BAR_CAPACITY
         if (slot <= 0f) return@Canvas
@@ -65,7 +66,7 @@ fun WaveformView(
             val amplitude = visible[j].coerceIn(0f, 1f)
             val half = minHalf + (maxHalf - minHalf) * amplitude
             drawLine(
-                color = barColor(slotIndex, active, inactiveColor),
+                color = barColor(slotIndex, active, inactiveColor, accentStart, accentEnd),
                 start = Offset(x, centerY - half),
                 end = Offset(x, centerY + half),
                 strokeWidth = barWidth,
@@ -76,8 +77,14 @@ fun WaveformView(
 }
 
 /** 柱色：活跃时横向铺品牌渐变（电光蓝→青），非活跃时统一低透明度灰。 */
-private fun DrawScope.barColor(slotIndex: Int, active: Boolean, inactiveColor: Color): Color {
+private fun DrawScope.barColor(
+    slotIndex: Int,
+    active: Boolean,
+    inactiveColor: Color,
+    accentStart: Color,
+    accentEnd: Color,
+): Color {
     if (!active) return inactiveColor
     val fraction = slotIndex.toFloat() / (BAR_CAPACITY - 1)
-    return lerp(GradientAccentStart, GradientAccentEnd, fraction)
+    return lerp(accentStart, accentEnd, fraction)
 }

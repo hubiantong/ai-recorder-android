@@ -107,3 +107,10 @@ val TimestampStyle = TextStyle(
     fontSize = 12.sp,
     lineHeight = 16.sp,
 )
+
+/**
+ * 数字排版：启用等宽数字（tabular figures，tnum）。
+ * 列表时长、文件信息等任何会变化/需要对齐的数字统一套用，
+ * 与录音计时（displayLarge + tnum）、播放器时间轴（[TimestampStyle] 等宽）构成三层规则。
+ */
+fun TextStyle.tabularNums(): TextStyle = copy(fontFeatureSettings = "tnum")

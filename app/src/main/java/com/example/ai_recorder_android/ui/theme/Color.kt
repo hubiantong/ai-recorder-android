@@ -76,20 +76,6 @@ val BrandLightInverseSurface = Color(0xFF2C3444)
 val BrandLightInverseOnSurface = Color(0xFFEEF1F7)
 val BrandLightInversePrimary = BrandBlue40
 
-// ---------- 语义扩展色（M3 槽位之外的品牌语义，组件直接引用） ----------
-
-/** 录音中：录音红（录音指示/脉冲）。 */
-val RecordingRed = Color(0xFFFF4D5E)
-
-/** 成功/已完成。 */
-val SuccessGreen = Color(0xFF4ADE80)
-
-/** 警告。 */
-val WarningAmber = Color(0xFFFBBF24)
-
-/** AI 处理中（与 tertiary 紫呼应）。 */
-val ProcessingViolet = Color(0xFF9B8CFF)
-
-/** 品牌渐变（强调元素，如音量条/主按钮）。 */
-val GradientAccentStart = Color(0xFF5B8DEF)
-val GradientAccentEnd = Color(0xFF64D2C5)
+// ---------- 语义扩展色 ----------
+// M3 槽位之外的品牌语义色（录音红/警告琥珀/AI 紫/强调渐变）已移至 ExtendedColors.kt，
+// 经 LocalBrandSemanticColors 按深浅主题注入；组件不得直接引用裸色值。

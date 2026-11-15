@@ -9,8 +9,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -31,6 +29,8 @@ import coil3.compose.AsyncImage
 import com.example.ai_recorder_android.data.db.DescriptionStatus
 import com.example.ai_recorder_android.data.db.RecordingAttachmentEntity
 import com.example.ai_recorder_android.service.PhotoAttachmentManager
+import com.example.ai_recorder_android.ui.components.GradientPrimaryButton
+import com.example.ai_recorder_android.ui.theme.Spacing
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -165,7 +165,7 @@ fun PhotoCaptureScreen(modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(Spacing.page),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -174,9 +174,9 @@ fun PhotoCaptureScreen(modifier: Modifier = Modifier) {
             text = "拍照后自动保存为录音附件并生成 AI 描述",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 8.dp),
+            modifier = Modifier.padding(top = Spacing.sm),
         )
-        PhotoCaptureSection(manager = manager, modifier = Modifier.padding(top = 24.dp))
+        PhotoCaptureSection(manager = manager, modifier = Modifier.padding(top = Spacing.xl))
     }
 }
 
@@ -188,12 +188,11 @@ fun PhotoCaptureSection(
 ) {
     val controller = rememberPhotoCaptureController(manager)
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Button(
+        GradientPrimaryButton(
+            text = "拍照",
             onClick = controller.launch,
             enabled = controller.photoState.value !is PhotoUiState.Saving,
-        ) {
-            Text("拍照")
-        }
+        )
         PhotoCaptureResult(controller = controller, manager = manager)
     }
 }

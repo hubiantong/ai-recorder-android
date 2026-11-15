@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -28,6 +27,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -36,9 +36,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.unit.dp
 import com.example.ai_recorder_android.R
 import com.example.ai_recorder_android.cloud.asr.SiliconFlowAsrConnector
 import com.example.ai_recorder_android.cloud.asr.WavDuration
@@ -48,6 +48,11 @@ import com.example.ai_recorder_android.data.db.AppDatabase
 import com.example.ai_recorder_android.data.db.TranscriptChunkEntity
 import com.example.ai_recorder_android.data.repo.RecordingRepository
 import com.example.ai_recorder_android.data.storage.StorageService
+import com.example.ai_recorder_android.ui.components.GradientPrimaryButton
+import com.example.ai_recorder_android.ui.components.SectionCard
+import com.example.ai_recorder_android.ui.components.formatDuration
+import com.example.ai_recorder_android.ui.theme.Spacing
+import com.example.ai_recorder_android.ui.theme.tabularNums
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -148,8 +153,12 @@ fun FileUploadScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         }
     }
 
+    // 品牌顶栏：常态与页面背景同色（沉浸），滚动后浮出 surfaceContainer 层级（对齐 DetailScreen）
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     Scaffold(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
                 title = { Text("文件转写") },
@@ -161,6 +170,11 @@ fun FileUploadScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                         )
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+                scrollBehavior = scrollBehavior,
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -170,24 +184,22 @@ fun FileUploadScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                 .padding(innerPadding)
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .padding(Spacing.page),
+            verticalArrangement = Arrangement.spacedBy(Spacing.lg),
         ) {
             // 头部说明卡片（对齐 PC 头部卡片）
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "音频文件转写",
-                        style = MaterialTheme.typography.titleLarge,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "上传本地音频文件（WAV / MP3 / M4A / OGG 等，≤25MB），" +
-                            "选择后自动转写并保存为录音记录。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+            SectionCard {
+                Text(
+                    text = "音频文件转写",
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                Spacer(modifier = Modifier.height(Spacing.sm))
+                Text(
+                    text = "上传本地音频文件（WAV / MP3 / M4A / OGG 等，≤25MB），" +
+                        "选择后自动转写并保存为录音记录。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             // 选择文件
@@ -201,28 +213,27 @@ fun FileUploadScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
 
             // 文件信息
             selected?.let { audio ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = audio.displayName,
-                            style = MaterialTheme.typography.titleMedium,
+                SectionCard {
+                    Text(
+                        text = audio.displayName,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xl)) {
+                        FileInfoItem(label = "大小", value = formatFileSize(audio.sizeBytes))
+                        FileInfoItem(
+                            label = "时长",
+                            value = audio.durationSeconds?.let { formatDuration(it) } ?: "未知",
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                            FileInfoItem(label = "大小", value = formatFileSize(audio.sizeBytes))
-                            FileInfoItem(
-                                label = "时长",
-                                value = audio.durationSeconds?.let { formatDuration(it) } ?: "未知",
-                            )
-                        }
                     }
                 }
             }
 
-            // 开始转写（对齐 PC：转写完成后禁用，直到重新选文件）
-            FilledTonalButton(
+            // 主 CTA：开始转写（对齐 PC：转写完成后禁用，直到重新选文件）
+            GradientPrimaryButton(
+                text = "开始转写",
                 onClick = {
-                    val audio = selected ?: return@FilledTonalButton
+                    val audio = selected ?: return@GradientPrimaryButton
                     scope.launch {
                         isTranscribing = true
                         resultText = null
@@ -239,10 +250,7 @@ fun FileUploadScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     }
                 },
                 enabled = selected != null && !isTranscribing && !transcribed,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("开始转写")
-            }
+            )
 
             // 转写进度
             if (isTranscribing) {
@@ -256,25 +264,23 @@ fun FileUploadScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
 
             // 转写结果
             resultText?.let { text ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "转写结果",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = text.ifBlank { "（未识别到语音内容）" },
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
+                SectionCard {
+                    Text(
+                        text = "转写结果",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Spacer(modifier = Modifier.height(Spacing.sm))
+                    Text(
+                        text = text.ifBlank { "（未识别到语音内容）" },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
             }
         }
     }
 }
 
-/** 文件信息行（标签 + 值）。 */
+/** 文件信息行（标签 + 值，数值用等宽数字排版）。 */
 @Composable
 private fun FileInfoItem(label: String, value: String) {
     Column {
@@ -283,7 +289,10 @@ private fun FileInfoItem(label: String, value: String) {
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(text = value, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium.tabularNums(),
+        )
     }
 }
 
@@ -384,10 +393,4 @@ private fun formatFileSize(bytes: Long): String = when {
     bytes >= 1024 * 1024 -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
     bytes >= 1024 -> String.format(Locale.US, "%.1f KB", bytes / 1024.0)
     else -> "$bytes B"
-}
-
-// 时长格式化：mm:ss
-private fun formatDuration(seconds: Double): String {
-    val total = seconds.toInt().coerceAtLeast(0)
-    return String.format(Locale.US, "%d:%02d", total / 60, total % 60)
 }

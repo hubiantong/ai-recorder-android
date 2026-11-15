@@ -26,16 +26,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.isUnspecified
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.example.ai_recorder_android.ui.theme.RecordingRed
+import com.example.ai_recorder_android.ui.theme.LocalBrandSemanticColors
 
 /** 录音中脉冲红点：alpha 呼吸动画（录音指示/处理中状态均可复用）。 */
 @Composable
 fun PulsingDot(
-    color: androidx.compose.ui.graphics.Color = RecordingRed,
     modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
 ) {
+    val semantic = LocalBrandSemanticColors.current
+    val resolved = if (color.isUnspecified) semantic.recording else color
     val transition = rememberInfiniteTransition(label = "pulse")
     val alpha by transition.animateFloat(
         initialValue = 1f,
@@ -51,7 +55,7 @@ fun PulsingDot(
             .size(8.dp)
             .alpha(alpha)
             .clip(CircleShape)
-            .background(color),
+            .background(resolved),
     )
 }
 
@@ -60,7 +64,7 @@ fun PulsingDot(
 fun ProcessingIndicator(text: String, modifier: Modifier = Modifier) {
     Column(modifier = modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            PulsingDot(color = MaterialTheme.colorScheme.tertiary)
+            PulsingDot(color = LocalBrandSemanticColors.current.processing)
             Spacer(modifier = Modifier.size(8.dp))
             Text(
                 text = text,
