@@ -8,12 +8,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -530,7 +530,11 @@ private fun DetailContent(
         item(key = "note") {
             NoteSection(
                 recording = recording,
+                images = images,
+                storage = storage,
                 hasTranscription = recording.transcription != null,
+                onSeekSeconds = onChunkClick,
+                onOpenAttachment = onAttachmentClick,
                 onRegenerate = onRegenerate,
             )
         }
@@ -652,13 +656,24 @@ private fun DetailActionsRow(
 @Composable
 private fun NoteSection(
     recording: RecordingEntity,
+    images: List<RecordingAttachmentEntity>,
+    storage: StorageService,
     hasTranscription: Boolean,
+    onSeekSeconds: (Double) -> Unit,
+    onOpenAttachment: (RecordingAttachmentEntity) -> Unit,
     onRegenerate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val summary = recording.summary
     when {
-        !summary.isNullOrBlank() -> FusionNoteSection(summary, modifier)
+        !summary.isNullOrBlank() -> FusionNoteSection(
+            summary = summary,
+            images = images,
+            storage = storage,
+            onSeekSeconds = onSeekSeconds,
+            onOpenAttachment = onOpenAttachment,
+            modifier = modifier,
+        )
         recording.status == RecordingStatus.FAILED -> SectionCard(modifier = modifier) {
             Text(
                 text = "AI 处理失败",
@@ -772,59 +787,6 @@ private fun TranscriptBubble(
     }
 }
 
-/** 融合笔记：Markdown 简化渲染（## → 加粗标题、- / * → 圆点列表，无 Markwon 依赖）。 */
-@Composable
-private fun FusionNoteSection(summary: String, modifier: Modifier = Modifier) {
-    val blocks = remember(summary) { parseMarkdown(summary) }
-    SectionCard(modifier = modifier) {
-        blocks.forEach { block ->
-            when (block) {
-                is NoteBlock.Heading -> Text(
-                    text = block.text,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
-
-                is NoteBlock.Bullet -> Row(Modifier.padding(top = 4.dp)) {
-                    Text("•", color = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(8.dp))
-                    Text(block.text, style = MaterialTheme.typography.bodyMedium)
-                }
-
-                is NoteBlock.Paragraph -> Text(
-                    text = block.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-            }
-        }
-    }
-}
-
-/** 笔记渲染块。 */
-private sealed interface NoteBlock {
-    data class Heading(val text: String) : NoteBlock
-    data class Bullet(val text: String) : NoteBlock
-    data class Paragraph(val text: String) : NoteBlock
-}
-
-/** 极简 Markdown 行解析：`#`/`##` → Heading，`-`/`*` → Bullet，其余 → Paragraph。 */
-private fun parseMarkdown(markdown: String): List<NoteBlock> =
-    markdown.lineSequence()
-        .map { it.trim() }
-        .filter { it.isNotEmpty() }
-        .map { line ->
-            when {
-                line.startsWith("## ") -> NoteBlock.Heading(line.removePrefix("## ").trim())
-                line.startsWith("# ") -> NoteBlock.Heading(line.removePrefix("# ").trim())
-                line.startsWith("- ") -> NoteBlock.Bullet(line.removePrefix("- ").trim())
-                line.startsWith("* ") -> NoteBlock.Bullet(line.removePrefix("* ").trim())
-                else -> NoteBlock.Paragraph(line)
-            }
-        }
-        .toList()
-
 /** 照片附件网格：3 列 LazyVerticalGrid + Coil AsyncImage；点击打开全屏查看。 */
 @Composable
 private fun AttachmentsGrid(
@@ -907,32 +869,19 @@ private fun FullScreenImageViewer(
 
 /** 转写时间段：m:ss 或 m:ss–m:ss（对齐 PC `_fmt_time`）。 */
 private fun formatTime(start: Double?, end: Double?): String {
-    val s = (start ?: 0.0).toInt().coerceAtLeast(0)
-    val base = "%d:%02d".format(s / 60, s % 60)
+    val base = formatNoteTimestamp(start ?: 0.0)
     if (end == null) return base
-    val e = end.toInt().coerceAtLeast(0)
-    return "$base–%d:%02d".format(e / 60, e % 60)
+    return "$base–${formatNoteTimestamp(end)}"
 }
 
-/** 播放器毫秒 → m:ss。 */
-private fun formatMs(ms: Long): String {
-    val total = (ms / 1000).coerceAtLeast(0)
-    return "%d:%02d".format(total / 60, total % 60)
-}
+/** 播放器毫秒 → m:ss（复用 [formatNoteTimestamp]，时间展示单一实现）。 */
+private fun formatMs(ms: Long): String = formatNoteTimestamp(ms / 1000.0)
 
 /** epoch 毫秒 → "yyyy-MM-dd HH:mm"（本地时区）。 */
 private fun formatDateTime(epochMs: Long): String =
     Instant.ofEpochMilli(epochMs)
         .atZone(ZoneId.systemDefault())
         .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
-
-/** 安全解析 locator；非法路径返回 null（不抛异常）。 */
-private fun resolveOrNull(storage: StorageService, locator: String): File? =
-    try {
-        storage.resolvePath(locator)
-    } catch (_: IllegalArgumentException) {
-        null
-    }
 
 /** 解析录音音频文件；locator 为空/非法/文件不存在返回 null。 */
 private fun resolveAudioFile(storage: StorageService, data: RecordingWithRelations): File? {
