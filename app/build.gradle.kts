@@ -33,7 +33,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.ai_recorder_android"
+        applicationId = "top.tongtong.airecorder"
         minSdk = 29
         targetSdk = 36
         versionCode = 1
@@ -86,6 +86,12 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+    }
+    // AGP 8.7.3 的 lifecycle lint 检测器与 Kotlin 2.2 分析 API 不兼容，
+    // release 的 lintVitalAnalyze 会因其崩溃（IncompatibleClassChangeError），
+    // 与业务代码无关，仅禁用该检测器。
+    lint {
+        disable += "NullSafeMutableLiveData"
     }
     tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
         compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
