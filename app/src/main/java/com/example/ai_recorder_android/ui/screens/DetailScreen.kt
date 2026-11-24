@@ -51,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -247,6 +248,8 @@ fun DetailScreen(
     var positionMs by remember { mutableLongStateOf(0L) }
     var selectedAttachment by remember { mutableStateOf<RecordingAttachmentEntity?>(null) }
     var showEditTitle by remember { mutableStateOf(false) }
+    var exporting by remember { mutableStateOf(false) }
+    val exportScope = rememberCoroutineScope()
 
     DisposableEffect(player) {
         if (player != null) {
@@ -298,6 +301,50 @@ fun DetailScreen(
     val handleBack: () -> Unit = onBack ?: { backDispatcher?.onBackPressed() }
 
     val clipboard = LocalClipboardManager.current
+
+    /**
+     * 导出音频/图片：复制为可读命名副本后唤起系统分享面板，用户可保存到文件/云盘、
+     * 通过蓝牙或附近分享传送到其他设备。
+     */
+    val exportMedia: (includeAudio: Boolean, includeImages: Boolean) -> Unit = { includeAudio, includeImages ->
+        val data = state.recording
+        if (data != null && !exporting) {
+            exporting = true
+            exportScope.launch {
+                try {
+                    val imageFiles = if (includeImages) {
+                        withContext(Dispatchers.IO) {
+                            state.imageAttachments.mapNotNull { resolveOrNull(storage, it.storageLocator) }
+                        }
+                    } else {
+                        emptyList()
+                    }
+                    // null = 导出过程异常（如系统无分享目标）；false = 无有效源文件
+                    val shared: Boolean? = try {
+                        exportRecordingMedia(
+                            context = context,
+                            recording = data.recording,
+                            audioFile = state.audioFile,
+                            imageFiles = imageFiles,
+                            includeAudio = includeAudio,
+                            chooserTitle = if (includeAudio) "导出音频" else "导出图片",
+                        )
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (shared == null) {
+                        android.widget.Toast.makeText(context, "导出失败，请稍后重试", android.widget.Toast.LENGTH_SHORT).show()
+                    } else if (!shared) {
+                        android.widget.Toast.makeText(context, "没有可导出的文件", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                } finally {
+                    exporting = false
+                }
+            }
+        }
+    }
 
     // 品牌顶栏：常态与页面背景同色（沉浸），滚动后浮出 surfaceContainer 层级
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
@@ -375,6 +422,11 @@ fun DetailScreen(
                         }
                         context.startActivity(Intent.createChooser(intent, "分享笔记"))
                     },
+                    hasAudio = state.audioFile != null,
+                    imageCount = state.imageAttachments.size,
+                    exporting = exporting,
+                    onExportAudio = { exportMedia(true, false) },
+                    onExportImages = { exportMedia(false, true) },
                     onRegenerate = {
                         viewModel.regenerateNote { ok ->
                             android.widget.Toast.makeText(
@@ -482,6 +534,11 @@ private fun DetailContent(
     onEditTitle: () -> Unit,
     onCopyNote: () -> Unit,
     onShare: () -> Unit,
+    hasAudio: Boolean,
+    imageCount: Int,
+    exporting: Boolean,
+    onExportAudio: () -> Unit,
+    onExportImages: () -> Unit,
     onRegenerate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -521,9 +578,14 @@ private fun DetailContent(
             DetailActionsRow(
                 hasNote = !recording.summary.isNullOrBlank(),
                 hasTranscription = recording.transcription != null,
+                hasAudio = hasAudio,
+                imageCount = imageCount,
+                exporting = exporting,
                 onCopyNote = onCopyNote,
                 onShare = onShare,
                 onRegenerate = onRegenerate,
+                onExportAudio = onExportAudio,
+                onExportImages = onExportImages,
             )
         }
 
@@ -609,40 +671,75 @@ private fun RecordingMeta(data: RecordingWithRelations, onEditTitle: () -> Unit,
     }
 }
 
-/** 操作行：复制笔记 / 分享 / 重新生成（按可用数据启用）。 */
+/**
+ * 操作区：第一行笔记操作（复制/分享/重新生成），第二行音频与图片导出。
+ * 导出经系统分享面板落地，可保存到文件/云盘或传送到其他设备。
+ */
 @Composable
 private fun DetailActionsRow(
     hasNote: Boolean,
     hasTranscription: Boolean,
+    hasAudio: Boolean,
+    imageCount: Int,
+    exporting: Boolean,
     onCopyNote: () -> Unit,
     onShare: () -> Unit,
     onRegenerate: () -> Unit,
+    onExportAudio: () -> Unit,
+    onExportImages: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    Column(
         modifier = modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        OutlinedButton(
-            onClick = onCopyNote,
-            enabled = hasNote,
-            modifier = Modifier.weight(1f),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("复制笔记", maxLines = 1)
+            OutlinedButton(
+                onClick = onCopyNote,
+                enabled = hasNote,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("复制笔记", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = onShare,
+                enabled = hasNote || hasTranscription,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("分享", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = onRegenerate,
+                enabled = hasTranscription,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("重新生成", maxLines = 1)
+            }
         }
-        OutlinedButton(
-            onClick = onShare,
-            enabled = hasNote || hasTranscription,
-            modifier = Modifier.weight(1f),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("分享", maxLines = 1)
-        }
-        OutlinedButton(
-            onClick = onRegenerate,
-            enabled = hasTranscription,
-            modifier = Modifier.weight(1f),
-        ) {
-            Text("重新生成", maxLines = 1)
+            OutlinedButton(
+                onClick = onExportAudio,
+                enabled = hasAudio && !exporting,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(if (exporting) "导出中…" else "导出音频", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = onExportImages,
+                enabled = imageCount > 0 && !exporting,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(
+                    text = if (imageCount > 0) "导出图片 ($imageCount)" else "导出图片",
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
